@@ -1,0 +1,966 @@
+components:
+  schemas:
+    # ------------------------------------------------------------------ 比赛
+    ContestKind:
+      type: string
+      description: |
+        竞赛类型。`regional` 区域赛，含网络赛、`provincial` 省赛、
+        `invitational` 邀请赛、`ecfinal` EC-Final、`world_final` 世界总决赛、
+        `online` 线上赛、`other` 其它。类型只用于展示与筛选，不影响名额与审核规则。
+      enum:
+        - regional
+        - provincial
+        - invitational
+        - ecfinal
+        - world_final
+        - online
+        - other
+      examples:
+        - regional
+
+    ContestRef:
+      type: object
+      description: |
+        比赛标识。本结构**不要求**比赛在系统内存在独立资源：名额池自带一份可读的
+        比赛描述，避免为一次性赛事创建长期实体。`season` 用 `YYYY-YYYY` 学年写法,
+        与 `name` 一起构成同一赛季内的唯一键（重复创建名额池返回 `409 conflict`）。
+      required:
+        - name
+        - kind
+        - season
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: 比赛名称，人类可读，例如 `2024 ICPC 亚洲区域赛（南京）`。
+        kind:
+          $ref: '#/components/schemas/ContestKind'
+        season:
+          type: string
+          pattern: '^\d{4}-\d{4}$'
+          description: 赛季，形如 `2024-2025`（起始年-结束年）。它与 `name` 一起构成同一赛季内的
+            唯一键：同一赛季同一比赛只能有一个名额池，重复创建返回 `409 conflict`。
+        external_id:
+          type:
+            - string
+            - 'null'
+          description: 外部系统，例如 ICPC 官网、报名系统中的比赛标识；未知时为 `null`。
+        held_on:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Date'
+            - type: 'null'
+          description: 比赛举办日期；未定时为 `null`（此时名额池排序字段 `held_on` 视为最大）。
+        location:
+          type:
+            - string
+            - 'null'
+          description: 举办地（城市/线上）；未知时为 `null`。
+        url:
+          type:
+            - string
+            - 'null'
+          format: uri
+          description: 比赛官网或报名页；未知时为 `null`。
+      examples:
+        - name: 2024 ICPC 亚洲区域赛（南京）
+          kind: regional
+          season: 2024-2025
+          external_id: icpc-2024-nanjing
+          held_on: '2024-11-16'
+          location: 南京
+          url: https://icpc.example.edu/nanjing-2024
+
+    # ------------------------------------------------------------------ 名额池
+    QuotaStatus:
+      type: string
+      description: |
+        名额池状态机，合法迁移只有一条主链加一条捷径：
+
+        `draft → open → closed → finalized → archived`，另允许 `draft → archived`
+        （草稿直接废弃）。**不允许跳级或回退**。各迁移分别由
+        `POST /quotas/{quota_id}/open`、`/close`、`/finalize` 触发，
+        `archived` 迁移随后续接口提供。
+
+        非法迁移一律 `409`；在认领与审核路径上使用细分错误码：
+        池未开启或处于 `closed` 时提交认领返回 `quota_not_open`，
+        已 `finalized`/`archived` 时返回 `quota_finalized`。
+      enum:
+        - draft
+        - open
+        - closed
+        - finalized
+        - archived
+      examples:
+        - open
+
+    QuotaEligibility:
+      type: object
+      description: |
+        认领资格过滤，可选。字段之间是**与**关系：全部满足的队伍/主体才被允许认领。
+        省略该对象或给空对象表示不限资格。服务端在提交认领时校验，
+        不满足返回 `403 forbidden`（并在 `detail` 指出未满足的条件）。
+      properties:
+        clubs:
+          type: array
+          description: |
+            参赛成员必须属于这些社团之一（命中任一即可）。省略表示不限社团；
+            两个社团的名单不同，因此这也是区分"哪个社团的人"的筛选条件。
+          items:
+            $ref: './identity.yaml#/components/schemas/ClubCode'
+        team_ids:
+          type: array
+          uniqueItems: true
+          description: 白名单队伍；非空时只允许这些队伍认领。
+          items:
+            $ref: './common.yaml#/components/schemas/Id'
+        labels:
+          type: array
+          uniqueItems: true
+          description: 参赛成员必须具备的标签（标签本身不授权，仅用于筛选）。
+          items:
+            $ref: './identity.yaml#/components/schemas/Label'
+        enrollment_years:
+          type: array
+          uniqueItems: true
+          description: 允许的入学年份集合，例如省赛限制在校生年级。
+          items:
+            type: integer
+            minimum: 1990
+            maximum: 2100
+        min_team_size:
+          type: integer
+          minimum: 1
+          maximum: 8
+          description: 认领时队伍成员数下限。
+        max_team_size:
+          type: integer
+          minimum: 1
+          maximum: 8
+          description: 认领时队伍成员数上限；必须 ≥ `min_team_size`，否则创建/更新名额池返回 `422`。
+      examples:
+        - team_ids:
+            - team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          labels:
+            - member
+          enrollment_years:
+            - 2022
+            - 2023
+          min_team_size: 3
+          max_team_size: 5
+
+    QuotaClaimWindow:
+      type: object
+      description: |
+        认领窗口（闭区间）：`opens_at` 之前提交认领返回 `409 quota_not_open`，
+        `closes_at` 之后提交返回 `409 claim_window_closed`。
+        必须在 `closes_at > opens_at`，否则创建/更新返回 `422`。
+        窗口与状态机独立：状态为 `open` 但当前时刻在窗口外，同样按窗口错误码拒绝；
+        随后 `close` 会永久关闭认领。
+      required:
+        - opens_at
+        - closes_at
+      properties:
+        opens_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        closes_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+      examples:
+        - opens_at: '2024-09-01T00:00:00.000Z'
+          closes_at: '2024-09-15T00:00:00.000Z'
+
+    QuotaCounts:
+      type: object
+      description: |
+        认领计数快照，与同一响应中的名额池状态来自同一事务视图。
+        `remaining = max(quota_total - claims_approved, 0)`；
+        `withdrawn`/`rejected` 不计入占用，`pending` 也不占用名额
+        （只有 `approved` 才真正占用，见 `QuotaClaim` 说明）。
+      required:
+        - claims_pending
+        - claims_approved
+        - claims_rejected
+        - claims_withdrawn
+        - remaining
+      properties:
+        claims_pending:
+          type: integer
+          minimum: 0
+          description: 等待管理员审核的认领数。
+        claims_approved:
+          type: integer
+          minimum: 0
+          description: 已批准并占用名额的认领数。
+        claims_rejected:
+          type: integer
+          minimum: 0
+          description: 已被拒绝的认领数。
+        claims_withdrawn:
+          type: integer
+          minimum: 0
+          description: 已由提交方主动撤销的认领数。
+        remaining:
+          type: integer
+          minimum: 0
+          description: 剩余名额，`max(quota_total - claims_approved, 0)`。
+      examples:
+        - claims_pending: 2
+          claims_approved: 3
+          claims_rejected: 1
+          claims_withdrawn: 0
+          remaining: 3
+
+    Quota:
+      type: object
+      description: |
+        名额池：一次区域赛名额分配对应一个池，管理员设置名额总数，队伍提交认领，
+        **认领必须经管理员批准才真正占用名额**。
+
+        **模型**：名额按赛季分配，`contest.season` 就是赛季；同一赛季下 `contest.name`
+        唯一，重复建池返回 `409 conflict`。每个池有 `quota_total` 个名额，一支队伍在本池
+        最多认领 `max_claims_per_team` 个，默认 2（可配 1..10）。超出剩余名额的认领不报错，
+        而是进入候补队列，等已批准认领被撤销时按优先级自动前移。
+        本系统没有"免审核直接占用"的开关：任何认领都要经过 `approve` 或 `reject`，
+        因此契约里不存在表示该规则的字段。
+
+        `counts` 与 `status` 来自同一事务视图，因此单次读取内部自洽。
+        `revision` 与 `ETag` 一致，写入时用 `If-Match` 做乐观并发控制。
+      required:
+        - id
+        - title
+        - contest
+        - quota_total
+        - max_claims_per_team
+        - status
+        - counts
+        - created_at
+        - updated_at
+        - revision
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: 名额池标题，例如 `2024 南京站名额`。
+        contest:
+          $ref: '#/components/schemas/ContestRef'
+        quota_total:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          description: |
+            名额总数。允许为 `0`（先宣布再追加）。降低该值不得低于已批准认领数，
+            否则返回 `409 quota_exceeded`。
+        max_claims_per_team:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 2
+          description: |
+            同一队伍在本池的认领上限，默认 `2`。计数只统计 `pending` 与 `approved`
+            的认领（`rejected`/`withdrawn`/`expired` 不占额度）；
+            超出返回 `409 team_claim_limit_reached`。
+        status:
+          $ref: '#/components/schemas/QuotaStatus'
+        counts:
+          $ref: '#/components/schemas/QuotaCounts'
+        claim_window:
+          oneOf:
+            - $ref: '#/components/schemas/QuotaClaimWindow'
+            - type: 'null'
+          description: |
+            认领窗口；`null` 表示未显式设置，此时 `open` 会以
+            `opens_at=now`、`closes_at=now+P14D` 补齐。
+        eligibility:
+          oneOf:
+            - $ref: '#/components/schemas/QuotaEligibility'
+            - type: 'null'
+          description: 认领资格过滤；`null` 表示不限。
+        notes:
+          type:
+            - string
+            - 'null'
+          maxLength: 2000
+          description: 面向成员的说明（名额数、报名方式等）；`finalized` 后仍可修改。
+        created_by:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/PrincipalRef'
+            - type: 'null'
+          description: 创建者；系统导入时为 `null`。
+        opened_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 首次进入 `open` 的时刻。
+        closed_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 进入 `closed` 的时刻；此前提交的 `pending` 仍可审核。
+        finalized_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 进入 `finalized` 的时刻；之后不可再审核或认领。
+        created_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        updated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        revision:
+          type: string
+          description: 版本标记，与 `ETag` 值一致；用于 `If-Match`。
+      examples:
+        - id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          title: 2024 南京站名额
+          contest:
+            name: 2024 ICPC 亚洲区域赛（南京）
+            kind: regional
+            season: 2024-2025
+            external_id: icpc-2024-nanjing
+            held_on: '2024-11-16'
+            location: 南京
+            url: https://icpc.example.edu/nanjing-2024
+          quota_total: 6
+          max_claims_per_team: 2
+          status: open
+          counts:
+            claims_pending: 2
+            claims_approved: 3
+            claims_rejected: 1
+            claims_withdrawn: 0
+            remaining: 3
+          claim_window:
+            opens_at: '2024-09-01T00:00:00.000Z'
+            closes_at: '2024-09-15T00:00:00.000Z'
+          eligibility: null
+          notes: 每队最多 3 人，含 1 名替补。
+          created_by:
+            id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            username: alice
+            display_name: 张三
+            kind: human
+          opened_at: '2024-09-01T00:00:00.000Z'
+          closed_at: null
+          finalized_at: null
+          created_at: '2024-08-20T02:00:00.000Z'
+          updated_at: '2024-09-03T07:08:09.123Z'
+          revision: '7'
+
+    CreateQuotaRequest:
+      type: object
+      description: |
+        新建名额池。服务端强制 `status=draft`，
+        `counts` 全零，这些字段不接受客户端指定。同一 `season + contest.name + kind`
+        重复时返回 `409 conflict`。
+      required:
+        - title
+        - contest
+        - quota_total
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: 名额池标题。
+        contest:
+          $ref: '#/components/schemas/ContestRef'
+        quota_total:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          description: 名额总数；可为 `0`，之后用 `PATCH` 追加。
+        max_claims_per_team:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 2
+          description: 同一队伍的认领上限，默认 `2`。
+        claim_window:
+          oneOf:
+            - $ref: '#/components/schemas/QuotaClaimWindow'
+            - type: 'null'
+          description: 认领窗口；省略或 `null` 时在 `open` 时按默认 14 天补齐。
+        eligibility:
+          oneOf:
+            - $ref: '#/components/schemas/QuotaEligibility'
+            - type: 'null'
+          description: 认领资格过滤；省略或 `null` 表示不限。
+        notes:
+          type:
+            - string
+            - 'null'
+          maxLength: 2000
+          description: 面向成员的说明。
+      examples:
+        - title: 2024 南京站名额
+          contest:
+            name: 2024 ICPC 亚洲区域赛（南京）
+            kind: regional
+            season: 2024-2025
+            external_id: icpc-2024-nanjing
+            held_on: '2024-11-16'
+            location: 南京
+            url: https://icpc.example.edu/nanjing-2024
+          quota_total: 6
+          max_claims_per_team: 2
+          claim_window:
+            opens_at: '2024-09-01T00:00:00.000Z'
+            closes_at: '2024-09-15T00:00:00.000Z'
+          eligibility: null
+          notes: 每队最多 3 人，含 1 名替补。
+
+    UpdateQuotaRequest:
+      type: object
+      description: |
+        部分更新名额池，只覆盖出现的字段（合并语义），至少给一个字段。
+        `contest`、`quota_total`、`max_claims_per_team`、`claim_window`、`eligibility`
+        在 `status=finalized` 后不可再改（`409 quota_finalized`），只有 `notes` 例外。
+        降低 `quota_total` 低于 `counts.claims_approved` 返回 `409 quota_exceeded`。
+      minProperties: 1
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: 新的标题。
+        contest:
+          $ref: '#/components/schemas/ContestRef'
+        quota_total:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          description: 新的名额总数；不得低于已批准数。
+        max_claims_per_team:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: 新的每队认领上限；调低不会撤销已有认领，只影响新提交。
+        claim_window:
+          oneOf:
+            - $ref: '#/components/schemas/QuotaClaimWindow'
+            - type: 'null'
+          description: 新的认领窗口；`null` 表示清空并恢复默认补齐行为。
+        eligibility:
+          oneOf:
+            - $ref: '#/components/schemas/QuotaEligibility'
+            - type: 'null'
+          description: 新的资格过滤；`null` 表示改为不限。
+        notes:
+          type:
+            - string
+            - 'null'
+          maxLength: 2000
+          description: 新的说明；`null` 表示清空。
+      examples:
+        - quota_total: 8
+          notes: 名额追加到 8 个。
+
+    # ------------------------------------------------------------------ 认领
+    QuotaClaimStatus:
+      type: string
+      description: |
+        认领状态机：`pending → (approved | rejected | withdrawn | expired | released)`，
+        终态不可再迁移。
+
+        - `pending`：已提交、等待管理员审核，**不占用名额**；名额不够时按 `priority` 排队候补；
+        - `approved`：管理员批准后占用一个名额。要释放它必须由管理员调用
+          `POST /quotas/{quota_id}/claims/{claim_id}/release`，队伍自己不能释放已批准名额；
+        - `rejected`：管理员拒绝，携带 `decision_note`；
+        - `withdrawn`：提交方在 `pending` 期间主动撤销，候补顺位释放；
+        - `expired`：名额池 `finalize` 时**仍在候补**（`waitlist_position` 非空）的 `pending`
+          会被置为 `expired`。非候补的 `pending` 会让 `finalize` 返回 `409` 并列出 id，
+          因此不会静默作废任何人的申请；
+        - `released`：管理员释放了原先已批准的名额，名额回到池里供他人认领。
+
+        除 `pending`（以及 `approved` 走 release）外，再次调用批准/拒绝/撤销一律返回
+        `409 conflict`。
+      enum:
+        - pending
+        - approved
+        - rejected
+        - withdrawn
+        - expired
+        - released
+      examples:
+        - pending
+
+
+    QuotaClaimMemberRole:
+      type: string
+      description: |
+        认领成员角色：`member` 正式队员、`reserve` 替补、`coach` 教练/领队。
+        角色只影响展示与赛事方审核材料，不改变名额占用数（一个认领占一个名额）。
+      enum:
+        - member
+        - reserve
+        - coach
+      examples:
+        - member
+
+    QuotaClaimMember:
+      type: object
+      description: |
+        认领成员快照。`principal` 是提交时刻的主体引用；`display_name` 与
+        `student_id` 是当时的成员快照，之后成员改名不影响已提交的认领。
+        `confirmed` 表示该成员已在自己的面板中确认参加。
+      required:
+        - principal
+        - role
+        - confirmed
+      properties:
+        principal:
+          $ref: './common.yaml#/components/schemas/PrincipalRef'
+        role:
+          $ref: '#/components/schemas/QuotaClaimMemberRole'
+        display_name:
+          type: string
+          description: 提交时刻的展示名快照。
+        student_id:
+          type:
+            - string
+            - 'null'
+          description: 提交时刻的学号快照；未填时为 `null`。
+        confirmed:
+          type: boolean
+          description: 该成员是否已确认参加（未确认不阻止认领，仅作提示）。
+      examples:
+        - principal:
+            id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            username: alice
+            display_name: 张三
+            kind: human
+          role: member
+          display_name: 张三
+          student_id: '2220210000'
+          confirmed: true
+
+    ReleaseQuotaClaimRequest:
+      type: object
+      description: |
+        管理员释放已批准认领时的可选说明。会被写进审计记录，便于事后说明"为什么把这个名额
+        放回去"。
+      properties:
+        reason:
+          type: string
+          maxLength: 200
+          description: 释放原因，例如"队伍退赛"。
+          examples:
+            - 队伍退赛
+      examples:
+        - reason: 队伍退赛
+
+    QuotaClaim:
+      type: object
+      description: |
+        队伍对某名额池的一次认领。**提交后恒为 `pending`，只有管理员批准
+        （`POST .../approve`）才占用名额**；`pending` 期间不减少 `remaining`。
+
+        超出剩余名额的认领**允许提交**，此时 `waitlist_position` 为整数（越小越靠前），
+        表示在候补队列中的位置；名额释放（撤销/拒绝/提高 quota）后服务端按
+        `(priority, submitted_at)` 自动前移并更新 `waitlist_position`，
+        但**不会自动批准**，仍需管理员操作。
+        `revision` 与 `ETag` 一致，审核用 `If-Match` 可做乐观并发控制。
+      required:
+        - id
+        - quota_id
+        - team
+        - members
+        - status
+        - submitted_by
+        - submitted_at
+        - created_at
+        - updated_at
+        - revision
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        quota_id:
+          $ref: './common.yaml#/components/schemas/Id'
+        team:
+          $ref: './common.yaml#/components/schemas/TeamRef'
+        members:
+          type: array
+          minItems: 1
+          maxItems: 8
+          description: 认领成员列表，含正式队员、替补与教练。
+          items:
+            $ref: '#/components/schemas/QuotaClaimMember'
+        status:
+          $ref: '#/components/schemas/QuotaClaimStatus'
+        priority:
+          type: integer
+          default: 100
+          minimum: 0
+          maximum: 1000
+          description: 优先级，**数值越小越优先**；相同优先级按 `submitted_at` 先到先得。
+        waitlist_position:
+          oneOf:
+            - type: integer
+              minimum: 1
+            - type: 'null'
+          description: |
+            候补顺位；`null` 表示不在候补队列（认领数未超剩余名额，或已批准/已终结）。
+        submitted_by:
+          $ref: './common.yaml#/components/schemas/PrincipalRef'
+        submitted_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        decided_by:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/PrincipalRef'
+            - type: 'null'
+          description: 审核人；`pending` 时为 `null`。
+        decided_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 审核时刻；`pending` 时为 `null`。
+        decision_note:
+          oneOf:
+            - type: string
+            - type: 'null'
+          description: 审核意见（拒绝时必填）。
+        expires_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 认领保留截止；`null` 表示不自动过期。
+        created_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        updated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        revision:
+          type: string
+          description: 版本标记，与 `ETag` 值一致。
+      examples:
+        - id: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          quota_id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          team:
+            id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            name: DMU-1
+          members:
+            - principal:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              role: member
+              display_name: 张三
+              student_id: '2220210000'
+              confirmed: true
+          status: pending
+          priority: 100
+          waitlist_position: null
+          submitted_by:
+            id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            username: alice
+            display_name: 张三
+            kind: human
+          submitted_at: '2024-09-02T03:04:05.000Z'
+          decided_by: null
+          decided_at: null
+          decision_note: null
+          expires_at: null
+          created_at: '2024-09-02T03:04:05.000Z'
+          updated_at: '2024-09-02T03:04:05.000Z'
+          revision: '1'
+
+    QuotaClaimRef:
+      type: object
+      description: 认领的轻量引用，用于名额池汇总（`QuotaSummary`）避免内联完整成员列表。
+      required:
+        - id
+        - team
+        - status
+        - submitted_at
+        - priority
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        team:
+          $ref: './common.yaml#/components/schemas/TeamRef'
+        status:
+          $ref: '#/components/schemas/QuotaClaimStatus'
+        submitted_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        priority:
+          type: integer
+          description: 优先级，数值越小越优先。
+      examples:
+        - id: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          team:
+            id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            name: DMU-1
+          status: approved
+          submitted_at: '2024-09-02T03:04:05.000Z'
+          priority: 100
+
+    CreateQuotaClaimRequest:
+      type: object
+      description: |
+        提交认领。可由**队伍队长**或持有 `quota:claim` 的机器人/服务主体代提；
+        服务端校验提交者是否属于该队伍（或具备代提权限）。
+
+        语义与错误分支：
+
+        - 成功后认领状态**恒为 `pending`**，必须经管理员 `approve` 才占用名额；
+        - 同一队伍在同一池的未终结认领数（`pending` + `approved`）不得超过
+          `max_claims_per_team`，超出 `409 team_claim_limit_reached`；
+        - 池未开启（`draft`）→ `409 quota_not_open`；
+        - 当前时刻在 `claim_window` 之外 → 早于 `opens_at` 为 `409 quota_not_open`，
+          晚于 `closes_at` 为 `409 claim_window_closed`；
+        - 池已 `closed`/`finalized`/`archived` → `409 quota_not_open` / `quota_finalized`；
+        - 认领数超过 `remaining` 时**允许提交**并进入候补
+          （响应中 `waitlist_position` 非空），不返回错误；
+        - 成员不在任何社团（`clubs` 为空）→ `422 validation_failed`。
+
+        同一 `Idempotency-Key` 重放返回**同一个**认领（不会重复提交）。
+      required:
+        - team_id
+        - members
+      properties:
+        team_id:
+          $ref: './common.yaml#/components/schemas/Id'
+        members:
+          type: array
+          minItems: 1
+          maxItems: 8
+          description: 参赛成员；至少 1 人、至多 8 人，含替补与教练。
+          items:
+            type: object
+            description: 单个成员的提交项；其余展示字段由服务端从成员快照补全。
+            required:
+              - principal_id
+            properties:
+              principal_id:
+                $ref: './common.yaml#/components/schemas/Id'
+              role:
+                $ref: '#/components/schemas/QuotaClaimMemberRole'
+        priority:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          default: 100
+          description: 优先级，数值越小越优先；默认 `100`。
+        note:
+          type:
+            - string
+            - 'null'
+          maxLength: 1000
+          description: 给审核人的说明，例如队伍构成、备赛情况。
+      examples:
+        - team_id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          members:
+            - principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              role: member
+            - principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+              role: member
+            - principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X2
+              role: reserve
+          priority: 100
+          note: 三人队，第三人为替补。
+
+    ApproveQuotaClaimRequest:
+      type: object
+      description: |
+        批准认领。批准后该认领立即占用一个名额（`counts.claims_approved` 加一，
+        `remaining` 减一），并写入审计日志。**批准不可撤销**；如需让出名额，
+        由管理员调整 `quota_total` 或走后续的取消批准端点。
+        当已批准数已达到 `quota_total` 时返回 `409 quota_exceeded`，
+        该认领**保持 `pending`**，响应 `detail` 与认领的 `waitlist_position`
+        给出候补顺位。
+      properties:
+        note:
+          type:
+            - string
+            - 'null'
+          maxLength: 1000
+          description: 可选的批准备注，写入 `QuotaClaim.decision_note` 与审计日志。
+      examples:
+        - note: 名额充足，同意。
+
+    RejectQuotaClaimRequest:
+      type: object
+      description: |
+        拒绝认领。是否释放名额：`pending` 认领本就不占名额，拒绝只改变状态并
+        释放其候补顺位；已 `approved` 的认领不能用本接口撤销（返回 `409 conflict`）。
+        拒绝必须给出理由，理由会进入审计日志并展示给提交者。
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: 拒绝理由（面向提交者展示）。
+      examples:
+        - reason: 该队伍已有两支队报名，超出每队上限。
+
+    QuotaSummary:
+      type: object
+      description: |
+        名额池汇总视图，供前端一次性渲染"已批准 / 候补 / 剩余"。
+        所有计数与两个列表来自**同一事务快照**，因此彼此自洽；
+        `over_quota` 恒为 `false`，仅用于前端做一致性断言
+        （若为 `true`，说明服务端出现了不应发生的超发，应立即报警）。
+      required:
+        - quota_id
+        - quota_total
+        - counts
+        - approved_claims
+        - waitlist
+        - over_quota
+        - generated_at
+      properties:
+        quota_id:
+          $ref: './common.yaml#/components/schemas/Id'
+        quota_total:
+          type: integer
+          minimum: 0
+          description: 名额总数。
+        counts:
+          $ref: '#/components/schemas/QuotaCounts'
+        approved_claims:
+          type: array
+          description: 已批准并占用名额的认领，按 `(priority, submitted_at)` 升序。
+          items:
+            $ref: '#/components/schemas/QuotaClaimRef'
+        waitlist:
+          type: array
+          description: 候补队列，按 `waitlist_position` 升序。
+          items:
+            $ref: '#/components/schemas/QuotaClaimRef'
+        over_quota:
+          type: boolean
+          const: false
+          description: 恒为 `false`；前端的一致性自检标志。
+        generated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+      examples:
+        - quota_id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          quota_total: 6
+          counts:
+            claims_pending: 2
+            claims_approved: 3
+            claims_rejected: 1
+            claims_withdrawn: 0
+            remaining: 3
+          approved_claims:
+            - id: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              team:
+                id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                name: DMU-1
+              status: approved
+              submitted_at: '2024-09-02T03:04:05.000Z'
+              priority: 100
+          waitlist:
+            - id: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+              team:
+                id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+                name: DMU-2
+              status: pending
+              submitted_at: '2024-09-03T03:04:05.000Z'
+              priority: 100
+          over_quota: false
+          generated_at: '2024-09-04T07:08:09.123Z'
+
+    PagedQuota:
+      description: 名额池的偏移分页结果。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/PageMeta'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页的名额池。
+              items:
+                $ref: '#/components/schemas/Quota'
+      examples:
+        - page: 1
+          size: 20
+          total: 1
+          has_next: false
+          items:
+            - id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              title: 2024 南京站名额
+              contest:
+                name: 2024 ICPC 亚洲区域赛（南京）
+                kind: regional
+                season: 2024-2025
+                external_id: icpc-2024-nanjing
+                held_on: '2024-11-16'
+                location: 南京
+                url: https://icpc.example.edu/nanjing-2024
+              quota_total: 6
+              max_claims_per_team: 2
+              status: open
+              counts:
+                claims_pending: 2
+                claims_approved: 3
+                claims_rejected: 1
+                claims_withdrawn: 0
+                remaining: 3
+              claim_window: null
+              eligibility: null
+              notes: null
+              created_by: null
+              opened_at: '2024-09-01T00:00:00.000Z'
+              closed_at: null
+              finalized_at: null
+              created_at: '2024-08-20T02:00:00.000Z'
+              updated_at: '2024-09-03T07:08:09.123Z'
+              revision: '7'
+
+    PagedQuotaClaim:
+      description: 认领的偏移分页结果。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/PageMeta'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页的认领。
+              items:
+                $ref: '#/components/schemas/QuotaClaim'
+      examples:
+        - page: 1
+          size: 20
+          total: 1
+          has_next: false
+          items:
+            - id: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              quota_id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              team:
+                id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                name: DMU-1
+              members:
+                - principal:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  role: member
+                  display_name: 张三
+                  student_id: '2220210000'
+                  confirmed: true
+              status: pending
+              priority: 100
+              waitlist_position: null
+              submitted_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              submitted_at: '2024-09-02T03:04:05.000Z'
+              decided_by: null
+              decided_at: null
+              decision_note: null
+              expires_at: null
+              created_at: '2024-09-02T03:04:05.000Z'
+              updated_at: '2024-09-02T03:04:05.000Z'
+              revision: '1'

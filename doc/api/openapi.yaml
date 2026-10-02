@@ -1,0 +1,409 @@
+openapi: 3.1.0
+
+info:
+  title: DMU/ICPC Dashboard API
+  version: 1.0.0
+  summary: 校队信息面板主服务器对外提供的 RESTful API
+  description: |
+    DMU/ICPC 集训队信息面板**主服务器**的 HTTP 契约。本目录下的 OpenAPI 文档是
+    唯一事实源，服务端实现、前端与各语言客户端都以它对齐。
+
+    **名词不认识时**先看 `README.md` 的「0.1 术语速查」：主体、成员、社团身份、scope、
+    标签、幂等键、ETag/revision、游标分页、物化聚合、名额认领、SSE 等都在那里一句话
+    解释清楚。**想按任务找端点**看那里的「2.1 按任务找端点」。
+
+    约定、实体、语义与**时序行为**见 `README.md`；编写规范见 `STYLE.md`。
+    本文档只描述主服务器。外部采集器、QQ/Agent 机器人与前端都是契约的调用方。
+
+    ## 模块一览
+
+    | 模块 | 说明 |
+    | --- | --- |
+    | `auth` | 登录、令牌刷新、登出、当前主体 |
+    | `accounts` | 账号与权限：创建主体、停用、标签与 scope、凭证签发 |
+    | `credentials` | 查看与撤销凭证：会话令牌、长期 API Key |
+    | `oj-handles` | 成员与 OJ ID 的绑定与归属校验 |
+    | `oj-data` | 采集结果的公开查询：提交记录、rating 记录、题目、统计 |
+    | `members` | 成员名单：查人筛人、填表档案、批量导入、活跃度 |
+    | `teams` | 队伍与分组 |
+    | `roster` | 成员名单导出，异步任务，默认排除一年未活跃者 |
+    | `ingest` | 采集器写入通道，幂等批量上报 |
+    | `crawler` | 采集器配置、运行状态与运行记录、代管触发 |
+    | `scoreboards` | 榜单 scoreList：定义、条目与历史 |
+    | `stats` | 训练 trend、热力图、直方图与总览 |
+    | `announcements` | 新闻板与公告：起草、发布、定时、置顶、广播 |
+    | `channels` | 广播渠道配置与测试 |
+    | `stream` | SSE 实时事件流与短时流令牌 |
+    | `quotas` | 名额池、认领与审核 |
+    | `config` | 参数配置的读取与运行时修改 |
+    | `sync` | 增量变更游标，供二次开发与离线缓存 |
+    | `audit` | 审计日志 |
+    | `ops` | 健康检查、元信息、指标、异步任务 |
+
+    ### 先看这里：`/members` 与 `/accounts` 怎么选
+
+    两者是同一个主体的两个入口，共享同一个 id 与 `ETag`。按你要做的事选：
+
+    | 你要做的事 | 用 |
+    | --- | --- |
+    | 查社团名单、按年级/专业/队伍/是否成员筛人、批量导入、看活跃度、改档案 | `members` |
+    | 建账号、停用、设 scope、签发或撤销 API Key、查权限 | `accounts` 与 `credentials` |
+
+    口诀：管"人"用 `members`，管"身份与访问"用 `accounts`。
+    完整对照见 `doc/api/README.md` §3.1，按任务找全部端点的索引见 §2.1。
+
+    ## 通用约定
+
+    - 基础路径 `/api/v1`。破坏性变更走 `/api/v2`，不原地修改。
+    - JSON，字段 `snake_case`。时间为 UTC RFC 3339，例如 `2024-05-06T07:08:09.123Z`。
+    - 错误响应统一 RFC 7807 `application/problem+json`，并带机器可读的 `code`。
+    - 认证用 `Authorization: Bearer <token>` 或 `X-API-Key`。SSE 另用短时流令牌。
+    - 列表分页用 `page`/`size`；大流量只读集合用游标 `cursor`/`limit`。
+    - 写操作幂等：携带 `Idempotency-Key`，重放返回相同结果并标注
+      `Idempotency-Replayed: true`。
+    - 条件请求：`ETag` 配 `If-None-Match` 读缓存，`If-Match` 配 `revision` 做并发控制。
+    - 增量同步：列表与 `GET /sync/changes` 支持 `updated_since` 游标。
+    - 限流：响应带 `X-RateLimit-*`，超限返回 `429` 与 `Retry-After`。
+    - 长任务返回 `202` 与 `Location`，客户端按 `Retry-After` 轮询 `GET /jobs/{job_id}`。
+    - 每个响应都带 `X-Request-Id`，与错误体的 `request_id` 一致。
+    - 完整时序见 `README.md`。每个操作的 `x-idempotent`、`x-consistency` 与
+      `x-freshness-bound` 扩展给出机器可读提示。
+  contact:
+    name: DMU XCPC Dev Group
+    url: https://github.com/dmu-xcpc/dmu_xcpc_dashboard_api
+  license:
+    name: MIT
+    identifier: MIT
+
+# 机器可读的**权限词汇表**（契约测试强制：文档里出现的 `资源:动作` 必须在此登记，
+# 且 README 的权限表与本列表完全一致）。通配形式 `<资源>:*` 与 `*` 不在此枚举。
+x-scopes:
+  - account:manage
+  - account:read
+  - account:self
+  - announcement:publish
+  - announcement:read
+  - announcement:write
+  - audit:read
+  - channel:manage
+  - config:manage
+  - config:read
+  - crawler:manage
+  - crawler:read
+  - ingest:write
+  - member:assign
+  - member:manage
+  - member:read
+  - member:read_pii
+  - metrics:read
+  - oj:manage
+  - oj:read
+  - oj:write
+  - ops:read
+  - profile:academic
+  - profile:clubs
+  - profile:contact
+  - profile:display
+  - scoreboard:manage
+  - scoreboard:read
+  - quota:claim
+  - quota:manage
+  - quota:read
+  - stats:read
+  - sync:read
+  - team:manage
+  - team:read
+
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+
+externalDocs:
+  description: 主服务器 API 设计与时序说明
+  url: https://github.com/dmu-xcpc/dmu_xcpc_dashboard_api/blob/main/doc/api/README.md
+
+servers:
+  - url: /api/v1
+    description: 同源部署（推荐；前端、机器人、采集器与 API 走同一域名）
+  - url: https://{host}/api/v1
+    description: 独立域名部署
+    variables:
+      host:
+        default: dashboard.dmu.edu.cn
+        description: 面板部署主机名
+
+tags:
+  - name: auth
+    description: 登录、令牌刷新、登出与当前主体。
+  - name: accounts
+    description: |
+      **账号与权限，以"身份"为中心**：创建主体、停用与启用、标签与 `资源:动作` scope
+      列表、签发与撤销凭证。典型场景是给 QQ 机器人发 API Key、停用某个账号、
+      查某主体拥有哪些权限。
+      **查人、筛人、填表档案、活跃度请用 `members`**，那是同一主体的另一视角，见 README §3.1。
+  - name: credentials
+    description: 会话令牌与机器人 API Key 的查看、撤销。
+  - name: oj-handles
+    description: 成员绑定 OJ ID：绑定、解绑、归属校验。
+  - name: oj-data
+    description: 采集结果的公开查询：提交记录、rating 变化、题目与账号统计。
+  - name: members
+    description: |
+      **成员名单，以"人"为中心**：查社团名单、按年级/专业/队伍/是否成员筛人、批量导入、
+      看活跃度、改档案、分配标签与 scope。典型场景是开学导名单、按年级出填表清单、
+      看谁最近没在训练、赛季组队。
+      **创建账号、停用、发凭证、配权限请用 `accounts`**，见 README §3.1。
+  - name: teams
+    description: 队伍与分组管理，用于按队伍聚合的榜单与名额认领。
+  - name: roster
+    description: 成员名单导出，异步执行。支持 CSV 与 JSON，默认排除超过 1 年未活跃的成员。
+  - name: ingest
+    description: 采集器写入通道：提交记录、rating 变化、账号快照、题目的幂等批量上报。
+  - name: crawler
+    description: 采集器配置，含网络失败后的代理服务器回退与运行状态；也支持服务端代管触发。
+  - name: scoreboards
+    description: 不同分组的 scoreList：定义、排名条目、条目历史与重建。
+  - name: stats
+    description: |
+      训练统计：随时间的变化趋势、按日热力图、分档直方图与总览数字。
+      **只出数字，不出名次**；需要排名与榜单请用 `scoreboards`。
+  - name: announcements
+    description: 新闻板/公告：起草、发布、定时、置顶、广播与投递记录。
+  - name: channels
+    description: 广播渠道配置与连通性测试，支持 QQ 群与 Webhook。
+  - name: stream
+    description: SSE 实时事件流与短时流令牌，覆盖公告、榜单与采集进度。
+  - name: quotas
+    description: 区域赛等名额池：管理员设置名额、队伍认领、管理员审核。
+  - name: config
+    description: 服务器参数配置。文件用 TOML 或 YAML，也可在运行时通过接口修改；不支持 XML。
+  - name: sync
+    description: 增量变更游标，供二次开发与离线缓存同步本地数据库。
+  - name: audit
+    description: 审计日志查询。
+  - name: ops
+    description: 健康检查、元信息、指标与异步任务。
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/login:
+    $ref: paths/auth.yaml#/login
+  /auth/refresh:
+    $ref: paths/auth.yaml#/refresh
+  /auth/logout:
+    $ref: paths/auth.yaml#/logout
+  /auth/me:
+    $ref: paths/auth.yaml#/me
+  /auth/me/password:
+    $ref: paths/auth.yaml#/mePassword
+  /auth/me/clubs:
+    $ref: paths/auth.yaml#/meClubs
+
+  /accounts:
+    $ref: paths/accounts.yaml#/accounts
+  /accounts/{account_id}:
+    $ref: paths/accounts.yaml#/account
+  /accounts/{account_id}/labels:
+    $ref: paths/accounts.yaml#/accountLabels
+  /accounts/{account_id}/scopes:
+    $ref: paths/accounts.yaml#/accountScopes
+  /accounts/{account_id}/password-reset:
+    $ref: paths/accounts.yaml#/accountPassword
+  /accounts/{account_id}/credentials:
+    $ref: paths/accounts.yaml#/accountCredentials
+
+  /credentials:
+    $ref: paths/credentials.yaml#/credentials
+  /credentials/{credential_id}:
+    $ref: paths/credentials.yaml#/credential
+
+  /oj-handles:
+    $ref: paths/oj_handles.yaml#/ojHandles
+  /oj-handles/{handle_id}:
+    $ref: paths/oj_handles.yaml#/ojHandle
+  /oj-handles/{handle_id}/verify:
+    $ref: paths/oj_handles.yaml#/ojHandleVerify
+
+  /oj/submissions:
+    $ref: paths/oj_data.yaml#/ojSubmissions
+  /oj/rating-history:
+    $ref: paths/oj_data.yaml#/ojRatingHistory
+  /oj/problems:
+    $ref: paths/oj_data.yaml#/ojProblems
+  /oj/handles/{handle_id}/stats:
+    $ref: paths/oj_data.yaml#/ojHandleStats
+
+  /members:
+    $ref: paths/members.yaml#/members
+  /members/import:
+    $ref: paths/members.yaml#/membersImport
+  /members/{member_id}:
+    $ref: paths/members.yaml#/member
+  /members/{member_id}/labels:
+    $ref: paths/members.yaml#/memberLabels
+  /members/{member_id}/scopes:
+    $ref: paths/members.yaml#/memberScopes
+  /members/{member_id}/clubs:
+    $ref: paths/members.yaml#/memberClubs
+  /members/{member_id}/activity:
+    $ref: paths/members.yaml#/memberActivity
+
+  /teams:
+    $ref: paths/teams.yaml#/teams
+  /teams/{team_id}:
+    $ref: paths/teams.yaml#/team
+  /teams/{team_id}/members:
+    $ref: paths/teams.yaml#/teamMembers
+
+  /roster/exports:
+    $ref: paths/roster.yaml#/rosterExports
+  /roster/exports/{export_id}:
+    $ref: paths/roster.yaml#/rosterExport
+  /roster/exports/{export_id}/download:
+    $ref: paths/roster.yaml#/rosterExportDownload
+
+  /ingest/oj/submissions:
+    $ref: paths/ingest.yaml#/ingestSubmissions
+  /ingest/oj/ratings:
+    $ref: paths/ingest.yaml#/ingestRatings
+  /ingest/oj/handle-snapshots:
+    $ref: paths/ingest.yaml#/ingestHandleSnapshots
+  /ingest/oj/problems:
+    $ref: paths/ingest.yaml#/ingestProblems
+
+  /crawler/config:
+    $ref: paths/crawler.yaml#/crawlerConfig
+  /crawler/status:
+    $ref: paths/crawler.yaml#/crawlerStatus
+  /crawler/runs:
+    $ref: paths/crawler.yaml#/crawlerRuns
+  /crawler/runs/{run_id}:
+    $ref: paths/crawler.yaml#/crawlerRun
+  /crawler/trigger:
+    $ref: paths/crawler.yaml#/crawlerTrigger
+
+  /scoreboards:
+    $ref: paths/scoreboards.yaml#/scoreboards
+  /scoreboards/{scoreboard_id}:
+    $ref: paths/scoreboards.yaml#/scoreboard
+  /scoreboards/{scoreboard_id}/entries:
+    $ref: paths/scoreboards.yaml#/scoreboardEntries
+  /scoreboards/{scoreboard_id}/entries/{entry_id}/history:
+    $ref: paths/scoreboards.yaml#/scoreboardEntryHistory
+  /scoreboards/{scoreboard_id}/rebuild:
+    $ref: paths/scoreboards.yaml#/scoreboardRebuild
+
+  /stats/trend:
+    $ref: paths/stats.yaml#/statsTrend
+  /stats/heatmap:
+    $ref: paths/stats.yaml#/statsHeatmap
+  /stats/histogram:
+    $ref: paths/stats.yaml#/statsHistogram
+  /stats/summary:
+    $ref: paths/stats.yaml#/statsSummary
+
+  /announcements:
+    $ref: paths/announcements.yaml#/announcements
+  /announcements/{announcement_id}:
+    $ref: paths/announcements.yaml#/announcement
+  /announcements/{announcement_id}/publish:
+    $ref: paths/announcements.yaml#/announcementPublish
+  /announcements/{announcement_id}/unpublish:
+    $ref: paths/announcements.yaml#/announcementUnpublish
+  /announcements/{announcement_id}/pin:
+    $ref: paths/announcements.yaml#/announcementPin
+  /announcements/{announcement_id}/broadcast:
+    $ref: paths/announcements.yaml#/announcementBroadcast
+  /announcements/{announcement_id}/deliveries:
+    $ref: paths/announcements.yaml#/announcementDeliveries
+
+  /channels:
+    $ref: paths/channels.yaml#/channels
+  /channels/{channel_id}:
+    $ref: paths/channels.yaml#/channel
+  /channels/{channel_id}/test:
+    $ref: paths/channels.yaml#/channelTest
+
+  /stream/events:
+    $ref: paths/stream.yaml#/streamEvents
+  /stream/tokens:
+    $ref: paths/stream.yaml#/streamTokens
+
+  /quotas:
+    $ref: paths/quotas.yaml#/quotas
+  /quotas/{quota_id}:
+    $ref: paths/quotas.yaml#/quota
+  /quotas/{quota_id}/open:
+    $ref: paths/quotas.yaml#/quotaOpen
+  /quotas/{quota_id}/close:
+    $ref: paths/quotas.yaml#/quotaClose
+  /quotas/{quota_id}/finalize:
+    $ref: paths/quotas.yaml#/quotaFinalize
+  /quotas/{quota_id}/summary:
+    $ref: paths/quotas.yaml#/quotaSummary
+  /quotas/{quota_id}/claims:
+    $ref: paths/quotas.yaml#/quotaClaims
+  /quotas/{quota_id}/claims/{claim_id}:
+    $ref: paths/quotas.yaml#/quotaClaim
+  /quotas/{quota_id}/claims/{claim_id}/approve:
+    $ref: paths/quotas.yaml#/quotaClaimApprove
+  /quotas/{quota_id}/claims/{claim_id}/reject:
+    $ref: paths/quotas.yaml#/quotaClaimReject
+  /quotas/{quota_id}/claims/{claim_id}/withdraw:
+    $ref: paths/quotas.yaml#/quotaClaimWithdraw
+  /quotas/{quota_id}/claims/{claim_id}/release:
+    $ref: paths/quotas.yaml#/quotaClaimRelease
+  /quotas/{quota_id}/claims/{claim_id}/confirm:
+    $ref: paths/quotas.yaml#/quotaClaimConfirm
+  /quotas/{quota_id}/archive:
+    $ref: paths/quotas.yaml#/quotaArchive
+
+  /config:
+    $ref: paths/config.yaml#/config
+  /config/schema:
+    $ref: paths/config.yaml#/configSchema
+
+  /sync/changes:
+    $ref: paths/sync.yaml#/syncChanges
+
+  /audit-logs:
+    $ref: paths/audit.yaml#/auditLogs
+
+  /health:
+    $ref: paths/ops.yaml#/health
+  /ready:
+    $ref: paths/ops.yaml#/ready
+  /meta:
+    $ref: paths/ops.yaml#/meta
+  /openapi.json:
+    $ref: paths/ops.yaml#/openapiJson
+  /metrics:
+    $ref: paths/ops.yaml#/metrics
+  /jobs:
+    $ref: paths/ops.yaml#/jobs
+  /jobs/{job_id}:
+    $ref: paths/ops.yaml#/job
+  /jobs/{job_id}/cancel:
+    $ref: paths/ops.yaml#/jobCancel
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        不透明凭证：人类使用 `POST /auth/login` 返回的会话令牌，
+        机器人/采集器使用管理员签发的长期 API Key。服务端存储、可撤销、可设过期。
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: 与 `bearerAuth` 等价的便捷写法，便于只支持自定义头的机器人。
+    streamTokenAuth:
+      type: apiKey
+      in: query
+      name: access_token
+      description: |
+        仅用于 `GET /stream/events`。由 `POST /stream/tokens` 签发，有效期不超过 10 分钟。
+        浏览器 `EventSource` 无法设置请求头，因此把令牌放在查询参数里。

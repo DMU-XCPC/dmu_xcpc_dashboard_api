@@ -1,0 +1,1114 @@
+components:
+  schemas:
+    # ------------------------------------------------------------------ 配置本体
+    ConfigSource:
+      type: string
+      description: |
+        当前生效配置的来源，用于排障：
+
+        - `file`：进程启动时读取的 TOML/YAML 配置文件，默认值；
+        - `api`：至少有一个字段被 `PATCH /config` 改过；
+        - `override`：存在环境变量覆盖，且其优先级高于文件与接口
+          （被覆盖的字段无法通过本接口修改，`PATCH` 返回 `409 conflict`）。
+
+        本服务只支持 TOML/YAML 配置文件与环境变量覆盖，**绝不支持 XML**。
+      enum:
+        - file
+        - api
+        - override
+      examples:
+        - file
+
+    ServerConfig:
+      type: object
+      description: 服务器对外行为（监听地址、跨域）。不含任何敏感项。
+      required:
+        - public_read
+        - base_url
+        - cors_origins
+      properties:
+        public_read:
+          type: boolean
+          description: 是否允许匿名读取 `public` 可见性资源（对应 `Meta.capabilities.public_read`）。
+        base_url:
+          type:
+            - string
+            - 'null'
+          format: uri
+          description: 对外基础 URL，用于生成分享链接与回调地址；`null` 表示按请求推导。
+        cors_origins:
+          type: array
+          items:
+            type: string
+          description: |
+            允许跨域访问的来源列表；`["*"]` 表示不限制。
+      examples:
+        - public_read: true
+          base_url: https://dashboard.dmu.edu.cn
+          cors_origins:
+            - https://dashboard.dmu.edu.cn
+
+    AuthConfig:
+      type: object
+      description: 认证与会话参数。
+      required:
+        - access_token_ttl
+        - refresh_token_ttl
+        - password_min_length
+        - session_max_per_principal
+      properties:
+        access_token_ttl:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'PT30M'
+          description: 访问令牌有效期，默认 `PT30M`。
+        refresh_token_ttl:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'P30D'
+          description: 刷新令牌有效期，默认 `P30D`。
+        password_min_length:
+          type: integer
+          default: 12
+          minimum: 8
+          maximum: 256
+          description: 口令最小长度，默认 `12`。
+        session_max_per_principal:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: 单主体允许同时存在的 `session` 凭证数；超出时最旧的会话被撤销。
+      examples:
+        - access_token_ttl: PT30M
+          refresh_token_ttl: P30D
+          password_min_length: 12
+          session_max_per_principal: 10
+
+    IngestConfig:
+      type: object
+      description: 采集写入通道（`/ingest/*`）的限制与保留期。
+      required:
+        - batch_max
+        - clock_skew_past
+        - clock_skew_future
+        - submissions_retention
+      properties:
+        batch_max:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          default: 500
+          description: 单批次最大条目数（对应 `Meta.capabilities.ingest_batch_max`），默认 `500`，超出返回 `413`。
+        clock_skew_past:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'P1095D'
+          description: 允许的历史时间偏差，默认 `P1095D`，约 3 年；更早的事件时间戳被拒绝。
+        clock_skew_future:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'P1D'
+          description: 允许的未来时间偏差，默认 `P1D`；用它容忍采集器时钟误差。
+        submissions_retention:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'P2Y'
+          description: |
+            提交记录保留期。**权威值见 `Config.retention.submissions`**（默认 `P2Y`），
+            这里只是回显；超期数据被归档/清理。
+      examples:
+        - batch_max: 500
+          clock_skew_past: P1095D
+          clock_skew_future: P1D
+          submissions_retention: P2Y
+
+    RosterConfig:
+      type: object
+      description: 成员视图与导出的参数。
+      required:
+        - active_within
+        - export_ttl
+        - export_row_limit
+      properties:
+        current_season:
+          type: string
+          pattern: '^[0-9]{4}-[0-9]{4}$'
+          description: |
+            当前赛季，写作 `2024-2025`（9 月 1 日到次年 8 月 31 日）。它是"省略 `season`
+            时服务端采用的赛季"，队伍与名额池都按它归年；换赛季时改这一项即可，
+            已有队伍保留自己记录里的 `season`。同时通过 `GET /meta` 的
+            `current_season` 回显给客户端，避免客户端自己猜。
+          examples:
+            - '2024-2025'
+        active_within:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'P365D'
+          description: 多久未活跃即从成员名单"活跃成员"中排除，默认 `P365D`。
+        export_ttl:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'PT15M'
+          description: 导出产物保留期，默认 `PT15M`；过期后下载返回 `410 export_expired`。
+        export_row_limit:
+          type: integer
+          default: 10000
+          minimum: 1
+          maximum: 1000000
+          description: 单次导出的最大行数，默认 `10000`，超出返回 `413 payload_too_large`。
+      examples:
+        - active_within: P365D
+          export_ttl: PT15M
+          export_row_limit: 10000
+
+    ScoreboardsConfig:
+      type: object
+      description: scoreList 的刷新与规模参数（榜单是 `eventual` 一致性资源）。
+      required:
+        - refresh_interval
+        - freshness_bound
+        - max_entries
+      properties:
+        refresh_interval:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'PT15M'
+          description: 后台重建榜单的间隔，默认 `PT15M`。
+        freshness_bound:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'PT15M'
+          description: 榜单可接受的最大滞后，默认 `PT15M`，对应端点上的 `x-freshness-bound`。
+        max_entries:
+          type: integer
+          default: 5000
+          minimum: 1
+          maximum: 100000
+          description: 单榜单最多保存的条目数，默认 `5000`，超出按排名截断。
+      examples:
+        - refresh_interval: PT15M
+          freshness_bound: PT15M
+          max_entries: 5000
+
+    StatsConfig:
+      type: object
+      description: 训练统计的物化与查询范围参数。
+      required:
+        - materialize_interval
+        - freshness_bound
+        - max_range_days
+      properties:
+        materialize_interval:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'PT1H'
+          description: 统计物化任务间隔，默认 `PT1H`。
+        freshness_bound:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'PT1H'
+          description: 统计可接受的最大滞后，默认 `PT1H`。
+        max_range_days:
+          type: integer
+          default: 730
+          minimum: 1
+          maximum: 3650
+          description: 单次统计查询允许的最大天数跨度，默认 `730`，超出返回 `422`。
+      examples:
+        - materialize_interval: PT1H
+          freshness_bound: PT1H
+          max_range_days: 730
+
+    BroadcastRetryConfig:
+      type: object
+      description: 公告广播的重试策略。
+      required:
+        - max_attempts
+        - backoff
+      properties:
+        max_attempts:
+          type: integer
+          default: 5
+          minimum: 1
+          maximum: 20
+          description: 单渠道投递的最大尝试次数，默认 `5`。
+        backoff:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'PT30S'
+          description: 首次重试的退避时长，默认 `PT30S`，后续按指数增长。
+      examples:
+        - max_attempts: 5
+          backoff: PT30S
+
+    AnnouncementsConfig:
+      type: object
+      description: 公告板的容量、去重与广播策略。
+      required:
+        - max_pinned
+        - dedup_window
+        - broadcast_retry
+      properties:
+        max_pinned:
+          type: integer
+          default: 3
+          minimum: 0
+          maximum: 50
+          description: 同时置顶的公告数上限，默认 `3`，超出返回 `409 quota_exceeded`。
+        dedup_window:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'P7D'
+          description: |
+            公告去重窗口，默认 `P7D`。窗口内同一 `dedup_key` 且内容相同返回 `200` 与既有
+            公告；同一 `dedup_key` 但内容不同返回 `409 dedup_conflict`。
+        broadcast_retry:
+          $ref: '#/components/schemas/BroadcastRetryConfig'
+      examples:
+        - max_pinned: 3
+          dedup_window: P7D
+          broadcast_retry:
+            max_attempts: 5
+            backoff: PT30S
+
+    StreamConfig:
+      type: object
+      description: SSE 事件流的时序参数。
+      required:
+        - heartbeat_interval
+        - replay_buffer_events
+        - replay_buffer_duration
+        - stream_token_ttl
+      properties:
+        heartbeat_interval:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'PT15S'
+          description: 心跳注释帧间隔，默认 `PT15S`，用于探测半开连接。
+        replay_buffer_events:
+          type: integer
+          default: 1000
+          minimum: 0
+          maximum: 1000000
+          description: 服务端保留的可重放事件条数，默认 `1000`。
+        replay_buffer_duration:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'PT5M'
+          description: 可重放事件的时间窗口，默认 `PT5M`；与条数上限两者取先到者。
+        stream_token_ttl:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'PT10M'
+          description: 短时流令牌有效期，默认 `PT10M`，上限即 `PT10M`。
+      examples:
+        - heartbeat_interval: PT15S
+          replay_buffer_events: 1000
+          replay_buffer_duration: PT5M
+          stream_token_ttl: PT10M
+
+    RateLimitConfig:
+      type: object
+      description: 各通道的限流阈值（每分钟/每小时）。超限返回 `429` 与 `Retry-After`。
+      required:
+        - default_per_minute
+        - ingest_per_minute
+        - export_per_hour
+      properties:
+        default_per_minute:
+          type: integer
+          default: 600
+          minimum: 1
+          maximum: 1000000
+          description: 普通读接口的默认每分钟请求上限，默认 `600`。
+        ingest_per_minute:
+          type: integer
+          default: 3000
+          minimum: 1
+          maximum: 1000000
+          description: 采集写入通道的每分钟请求上限，默认 `3000`。
+        export_per_hour:
+          type: integer
+          default: 20
+          minimum: 1
+          maximum: 100000
+          description: 导出发起次数的每小时上限，默认 `20`。
+      examples:
+        - default_per_minute: 600
+          ingest_per_minute: 3000
+          export_per_hour: 20
+
+    JudgesConfig:
+      type: object
+      description: 采集平台开关与采集间隔。
+      required:
+        - enabled
+        - crawl_interval
+      properties:
+        enabled:
+          type: array
+          uniqueItems: true
+          description: 已启用的平台集合；`other` 需配合资源的 `judge_label` 使用。
+          items:
+            $ref: './common.yaml#/components/schemas/Judge'
+        crawl_interval:
+          $ref: './common.yaml#/components/schemas/Duration'
+          default: 'PT30M'
+          description: 每个平台的常规采集间隔，默认 `PT30M`。
+      examples:
+        - enabled:
+            - codeforces
+            - atcoder
+          crawl_interval: PT30M
+
+    LogConfig:
+      type: object
+      description: 服务端日志级别与格式。
+      required:
+        - level
+        - format
+      properties:
+        level:
+          type: string
+          enum:
+            - trace
+            - debug
+            - info
+            - warn
+            - error
+          description: 日志级别；调低会显著增加日志量，谨慎在生产环境使用。
+        format:
+          type: string
+          enum:
+            - text
+            - json
+          description: 日志格式；`json` 便于日志系统采集。
+      examples:
+        - level: info
+          format: json
+
+    AccountsConfig:
+      type: object
+      description: |
+        账号与自助权限的默认值。
+
+        **scope 模板**是一组预置的 scope，创建账号时可一次套用（`CreateAccountRequest.template`），
+        避免每次手写列表。模板只是"初始值"，套用后仍可用
+        `PUT /accounts/{account_id}/scopes` 逐项增删。
+
+        **自助修改自己的档案**靠 `profile:*` 这组 scope 控制：`profile:display` 改展示名，
+        `profile:contact` 改联系方式，`profile:academic` 改学籍，`profile:clubs` 登记社团。
+        默认模板 `user` 含全部四组——因为档案本来就是成员自己填的；要对个别人收窄，
+        把他的对应 scope 去掉即可。
+      required:
+        - default_template
+        - templates
+      properties:
+        default_template:
+          type: string
+          description: 新建账号未指定 `template` 时套用的模板名，必须存在于 `templates` 中。
+          examples:
+            - user
+        templates:
+          type: object
+          description: |
+            模板名到 scope 集合的映射：键是模板名，值是套用该模板时授予的 scope 列表。
+            可自由增删模板；删除仍被 `default_template` 引用的模板会被拒绝。
+          additionalProperties:
+            type: object
+            required:
+              - scopes
+            properties:
+              description:
+                type: string
+                description: 模板用途说明，供管理界面展示。
+                maxLength: 120
+              scopes:
+                type: array
+                description: 套用该模板时授予的 scope 列表。
+                items:
+                  $ref: './identity.yaml#/components/schemas/Scope'
+      examples:
+        - default_template: user
+          templates:
+            user:
+              description: 普通成员；可自助维护自己的档案与社团登记。
+              scopes:
+              - account:self
+              - profile:display
+              - profile:contact
+              - profile:academic
+              - profile:clubs
+              - member:read
+              - team:read
+              - oj:read
+              - oj:write
+              - quota:claim
+            manager:
+              description: 管理员；在 user 基础上可读 PII、管人与管名额。
+              scopes:
+              - account:self
+              - profile:display
+              - profile:contact
+              - profile:academic
+              - profile:clubs
+              - member:read
+              - team:read
+              - oj:read
+              - oj:write
+              - quota:claim
+              - member:read_pii
+              - member:manage
+              - member:assign
+              - team:manage
+              - oj:manage
+              - quota:read
+              - quota:manage
+              - scoreboard:read
+              - scoreboard:manage
+              - stats:read
+              - sync:read
+              - audit:read
+              - announcement:read
+              - announcement:write
+              - announcement:publish
+            collector:
+              description: 采集器；只写采集通道。
+              scopes:
+                - ingest:write
+                - crawler:read
+
+    RetentionConfig:
+      type: object
+      description: |
+        各类数据的保留期，**这是保留期的唯一权威出处**：其它 schema 里的保留期字段
+        只是引用这里，不要各写一份默认值。超期数据由服务端清理，客户端不得依赖更早的历史。
+      properties:
+        submissions:
+          $ref: './common.yaml#/components/schemas/Duration'
+          description: 提交、rating 与快照等采集原始记录的保留期。
+          default: 'P2Y'
+        audit_logs:
+          $ref: './common.yaml#/components/schemas/Duration'
+          description: 审计记录的保留期。
+          default: 'P2Y'
+        jobs:
+          $ref: './common.yaml#/components/schemas/Duration'
+          description: 已完成异步任务（含导出记录）的保留期；产物文件另见 `roster.export_ttl`。
+          default: 'P30D'
+        sync_changes:
+          $ref: './common.yaml#/components/schemas/Duration'
+          description: |
+            增量变更流的保留期；游标超出它就返回 `410 cursor_expired`，客户端要重新基线化。
+          default: 'P30D'
+        announcements_archived:
+          $ref: './common.yaml#/components/schemas/Duration'
+          description: 已归档公告的保留期。
+          default: 'P2Y'
+      examples:
+        - submissions: P2Y
+          audit_logs: P2Y
+          jobs: P30D
+          sync_changes: P30D
+          announcements_archived: P2Y
+
+    Config:
+      type: object
+      description: |
+        当前**生效**的服务器配置（只读视图）。所有字段都会返回：未在文件中显式配置的
+        字段取内置默认值，见各字段说明中的"默认"，因此客户端可把本响应当作完整快照。
+
+        取值来源见 `source`：TOML/YAML 配置文件 → 环境变量覆盖 → `PATCH /config`。
+        本服务**只支持 TOML/YAML 配置文件，绝不支持 XML**；接口只收发 JSON。
+
+        **敏感项**，例如 webhook secret、数据库口令、签名密钥永不出现在本响应中：
+        它们在 `GET /config/schema` 里标记 `secret: true`，实际只以同段下的
+        `<字段名>_set` 布尔字段反映"是否已设置"（当前暴露的各段均无敏感项，
+        因此本结构暂无 `*_set` 字段）。
+
+        `restart_required_fields` 列出**当前期望值与正在运行的进程不一致、
+        需要重启才生效**的字段（JSON Pointer 列表）：空数组表示全部已生效。
+        改到这些字段的 `PATCH` 会成功返回，但值要等重启后才真正作用于运行时。
+      required:
+        - revision
+        - source
+        - updated_at
+        - server
+        - auth
+        - accounts
+        - ingest
+        - roster
+        - scoreboards
+        - stats
+        - announcements
+        - stream
+        - rate_limit
+        - judges
+        - log
+        - restart_required_fields
+      properties:
+        revision:
+          type: string
+          description: 配置版本标记，与 `ETag` 一致；`If-Match` 用它做并发控制。
+        source:
+          $ref: '#/components/schemas/ConfigSource'
+        updated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+          description: 最后一次生效变更的时刻（文件加载或接口修改）。
+        server:
+          $ref: '#/components/schemas/ServerConfig'
+        auth:
+          $ref: '#/components/schemas/AuthConfig'
+        accounts:
+          $ref: '#/components/schemas/AccountsConfig'
+        ingest:
+          $ref: '#/components/schemas/IngestConfig'
+        roster:
+          $ref: '#/components/schemas/RosterConfig'
+        scoreboards:
+          $ref: '#/components/schemas/ScoreboardsConfig'
+        stats:
+          $ref: '#/components/schemas/StatsConfig'
+        announcements:
+          $ref: '#/components/schemas/AnnouncementsConfig'
+        stream:
+          $ref: '#/components/schemas/StreamConfig'
+        rate_limit:
+          $ref: '#/components/schemas/RateLimitConfig'
+        judges:
+          $ref: '#/components/schemas/JudgesConfig'
+        log:
+          $ref: '#/components/schemas/LogConfig'
+        retention:
+          $ref: '#/components/schemas/RetentionConfig'
+        restart_required_fields:
+          type: array
+          items:
+            type: string
+            pattern: '^/'
+          description: |
+            需要重启进程才生效的字段的 JSON Pointer 列表，例如 `["/log/level"]`；
+            空数组表示所有已接受的变更均已作用于运行时。
+      examples:
+        - revision: '42'
+          source: api
+          updated_at: '2024-05-06T07:08:09.123Z'
+          server:
+            public_read: true
+            base_url: https://dashboard.dmu.edu.cn
+            cors_origins:
+              - https://dashboard.dmu.edu.cn
+          auth:
+            access_token_ttl: PT30M
+            refresh_token_ttl: P30D
+            password_min_length: 12
+            session_max_per_principal: 10
+          accounts:
+            default_template: user
+            templates:
+              user:
+                description: 普通成员；可自助维护自己的档案与社团登记。
+                scopes:
+                - account:self
+                - profile:display
+                - profile:contact
+                - profile:academic
+                - profile:clubs
+                - member:read
+                - team:read
+                - oj:read
+                - oj:write
+                - quota:claim
+              manager:
+                description: 管理员；在 user 基础上可读 PII、管人与管名额。
+                scopes:
+                - account:self
+                - profile:display
+                - profile:contact
+                - profile:academic
+                - profile:clubs
+                - member:read
+                - team:read
+                - oj:read
+                - oj:write
+                - quota:claim
+                - member:read_pii
+                - member:manage
+                - member:assign
+                - team:manage
+                - oj:manage
+                - quota:read
+                - quota:manage
+                - scoreboard:read
+                - scoreboard:manage
+                - stats:read
+                - sync:read
+                - audit:read
+                - announcement:read
+                - announcement:write
+                - announcement:publish
+              collector:
+                description: 采集器；只写采集通道。
+                scopes:
+                  - ingest:write
+                  - crawler:read
+          ingest:
+            batch_max: 500
+            clock_skew_past: P1095D
+            clock_skew_future: P1D
+            submissions_retention: P2Y
+          roster:
+            active_within: P365D
+            export_ttl: PT15M
+            export_row_limit: 10000
+          scoreboards:
+            refresh_interval: PT15M
+            freshness_bound: PT15M
+            max_entries: 5000
+          stats:
+            materialize_interval: PT1H
+            freshness_bound: PT1H
+            max_range_days: 730
+          announcements:
+            max_pinned: 3
+            dedup_window: P7D
+            broadcast_retry:
+              max_attempts: 5
+              backoff: PT30S
+          stream:
+            heartbeat_interval: PT15S
+            replay_buffer_events: 1000
+            replay_buffer_duration: PT5M
+            stream_token_ttl: PT10M
+          rate_limit:
+            default_per_minute: 600
+            ingest_per_minute: 3000
+            export_per_hour: 20
+          judges:
+            enabled:
+              - codeforces
+              - atcoder
+            crawl_interval: PT30M
+          log:
+            level: info
+            format: json
+          restart_required_fields: []
+
+    ConfigPatch:
+      type: object
+      description: |
+        配置变更请求。与 `Config` 同构，但**所有字段可选**、不含 `revision`、`source`、
+        `updated_at`、`restart_required_fields`（这些由服务端维护）。
+        段落按**叶子级合并**应用；任一段写 `null` 表示把整段恢复为配置文件默认值。
+        接受 `null` 表示恢复该字段的文件默认值。
+
+        语义：**整体校验、全量应用或全部拒绝**。服务端先对合并后的完整配置做一次性
+        校验，任一字段非法则整体拒绝（`422 validation_failed`，
+        `errors[].pointer` 指向具体配置路径，如 `/ingest/batch_max`），
+        **不产生任何部分生效**。校验范围包括跨字段一致性，例如
+        `eligibility` 式的上下限、`export_ttl ≤ active_within` 等。
+
+        变更对后续请求立即生效；被列为需要重启的字段会出现在响应
+        `restart_required_fields` 中，要等重启后才影响运行时。本接口会写审计日志。
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        server:
+          type:
+            - object
+            - 'null'
+          description: 服务器对外行为；`null` 恢复整段文件默认值。
+          properties:
+            public_read:
+              type:
+                - boolean
+                - 'null'
+              description: 是否允许匿名读取 `public` 资源。
+            base_url:
+              type:
+                - string
+                - 'null'
+              format: uri
+              description: 对外基础 URL。
+            cors_origins:
+              oneOf:
+                - type: array
+                  items:
+                    type: string
+                - type: 'null'
+              description: 允许的跨域来源列表。
+        auth:
+          type:
+            - object
+            - 'null'
+          description: 认证与会话参数；`null` 恢复整段文件默认值。
+          properties:
+            access_token_ttl:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+            refresh_token_ttl:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+            password_min_length:
+              type:
+                - integer
+                - 'null'
+              minimum: 8
+              maximum: 256
+            session_max_per_principal:
+              type:
+                - integer
+                - 'null'
+              minimum: 1
+              maximum: 100
+        accounts:
+          $ref: '#/components/schemas/AccountsConfig'
+        ingest:
+          type:
+            - object
+            - 'null'
+          description: 采集通道参数；`null` 恢复整段文件默认值。
+          properties:
+            batch_max:
+              type:
+                - integer
+                - 'null'
+              minimum: 1
+              maximum: 10000
+            clock_skew_past:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+            clock_skew_future:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+            submissions_retention:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+        roster:
+          type:
+            - object
+            - 'null'
+          description: 成员与导出参数；`null` 恢复整段文件默认值。
+          properties:
+            active_within:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+            export_ttl:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+            export_row_limit:
+              type:
+                - integer
+                - 'null'
+              default: 100000
+              minimum: 1
+              maximum: 1000000
+              description: |
+                单次成员名单导出允许的最大行数，默认 100 000；命中行数超过它返回
+                `413 payload_too_large`，提示调用方缩小筛选范围或分批导出。
+        scoreboards:
+          type:
+            - object
+            - 'null'
+          description: 榜单参数；`null` 恢复整段文件默认值。
+          properties:
+            refresh_interval:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+            freshness_bound:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+            max_entries:
+              type:
+                - integer
+                - 'null'
+              minimum: 1
+              maximum: 100000
+        stats:
+          type:
+            - object
+            - 'null'
+          description: 统计参数；`null` 恢复整段文件默认值。
+          properties:
+            materialize_interval:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+            freshness_bound:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+            max_range_days:
+              type:
+                - integer
+                - 'null'
+              minimum: 1
+              maximum: 3650
+        announcements:
+          type:
+            - object
+            - 'null'
+          description: 公告参数；`null` 恢复整段文件默认值。
+          properties:
+            max_pinned:
+              type:
+                - integer
+                - 'null'
+              minimum: 0
+              maximum: 50
+            dedup_window:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+            broadcast_retry:
+              type:
+                - object
+                - 'null'
+              description: 广播重试策略；`null` 恢复该段文件默认值。
+              properties:
+                max_attempts:
+                  type:
+                    - integer
+                    - 'null'
+                  minimum: 1
+                  maximum: 20
+                backoff:
+                  oneOf:
+                    - $ref: './common.yaml#/components/schemas/Duration'
+                    - type: 'null'
+        stream:
+          type:
+            - object
+            - 'null'
+          description: SSE 参数；`null` 恢复整段文件默认值。
+          properties:
+            heartbeat_interval:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+            replay_buffer_events:
+              type:
+                - integer
+                - 'null'
+              minimum: 0
+              maximum: 1000000
+            replay_buffer_duration:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+            stream_token_ttl:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+        rate_limit:
+          type:
+            - object
+            - 'null'
+          description: 限流阈值；`null` 恢复整段文件默认值。
+          properties:
+            default_per_minute:
+              type:
+                - integer
+                - 'null'
+              minimum: 1
+              maximum: 1000000
+            ingest_per_minute:
+              type:
+                - integer
+                - 'null'
+              minimum: 1
+              maximum: 1000000
+            export_per_hour:
+              type:
+                - integer
+                - 'null'
+              minimum: 1
+              maximum: 100000
+        judges:
+          type:
+            - object
+            - 'null'
+          description: 采集平台开关；`null` 恢复整段文件默认值。
+          properties:
+            enabled:
+              oneOf:
+                - type: array
+                  uniqueItems: true
+                  items:
+                    $ref: './common.yaml#/components/schemas/Judge'
+                - type: 'null'
+            crawl_interval:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Duration'
+                - type: 'null'
+        log:
+          type:
+            - object
+            - 'null'
+          description: 日志参数；`null` 恢复整段文件默认值。调整 `level` 通常需要重启。
+          properties:
+            level:
+              oneOf:
+                - type: string
+                  enum:
+                    - trace
+                    - debug
+                    - info
+                    - warn
+                    - error
+                - type: 'null'
+            format:
+              oneOf:
+                - type: string
+                  enum:
+                    - text
+                    - json
+                - type: 'null'
+      examples:
+        - ingest:
+            batch_max: 800
+          log:
+            level: debug
+        - server:
+            cors_origins:
+              - https://dashboard.dmu.edu.cn
+              - https://admin.dmu.edu.cn
+        - ingest:
+            batch_max: null
+
+    # ------------------------------------------------------------------ 配置元数据
+    ConfigFieldSpec:
+      type: object
+      description: |
+        单个配置字段的元数据。客户端据此自动渲染表单：按 `type` 选择控件、
+        用 `enum`/`min`/`max` 做前端校验、把 `mutable=false` 的字段设为只读、
+        对 `secret=true` 的字段只渲染"是否已设置"的开关（值永不回显）。
+      required:
+        - path
+        - type
+        - mutable
+        - restart_required
+        - description
+      properties:
+        retention:
+          $ref: '#/components/schemas/RetentionConfig'
+        path:
+          type: string
+          pattern: '^/'
+          description: 字段的 JSON Pointer 路径，例如 `/ingest/batch_max`。
+        type:
+          type: string
+          enum:
+            - string
+            - integer
+            - number
+            - boolean
+            - duration
+            - enum
+            - string_list
+            - object
+          description: |
+            字段值类型。`duration` 为 ISO-8601 时长字符串，`enum` 需配合 `enum` 列表，
+            `string_list` 为字符串数组，`object` 为嵌套段（其子字段单独列出）。
+        default:
+          description: 文件默认值；无默认（必须显式配置）时为 `null`。
+        enum:
+          type: array
+          description: '`type=enum` 时的允许取值；其它类型省略。'
+          items:
+            type: string
+        min:
+          type: number
+          description: 数值/时长下界，含；不适用时省略。
+        max:
+          type: number
+          description: 数值/时长上界，含；不适用时省略。
+        secret:
+          type: boolean
+          default: false
+          description: 敏感字段标记。为 `true` 时值永不出现在 `GET /config`，只回显 `<字段名>_set`。
+        mutable:
+          type: boolean
+          description: 是否允许通过 `PATCH /config` 修改；`false` 表示改它返回 `409 conflict`。
+        restart_required:
+          type: boolean
+          description: 为 `true` 表示修改后需重启才作用于运行时，会出现在 `restart_required_fields`。
+        description:
+          type: string
+          description: 面向人类的中文字段说明。
+      examples:
+        - path: /ingest/batch_max
+          type: integer
+          default: 500
+          min: 1
+          max: 10000
+          secret: false
+          mutable: true
+          restart_required: false
+          description: 单个 ingest 批次允许的最大条目数。
+
+    ConfigSectionSpec:
+      type: object
+      description: 配置分组（对应 `Config` 的一个顶层段落），用于在表单里分块展示。
+      required:
+        - key
+        - title
+        - description
+        - fields
+      properties:
+        key:
+          type: string
+          description: 段落的字段名，例如 `ingest`，也是 `Config` 顶层属性名。
+        title:
+          type: string
+          description: 分组标题（中文，面向人类）。
+        description:
+          type: string
+          description: 分组说明。
+        fields:
+          type: array
+          description: 该段包含的字段元数据。
+          items:
+            $ref: '#/components/schemas/ConfigFieldSpec'
+      examples:
+        - key: ingest
+          title: 采集通道
+          description: 采集器写入通道的限制与保留期。
+          fields:
+            - path: /ingest/batch_max
+              type: integer
+              default: 500
+              min: 1
+              max: 10000
+              secret: false
+              mutable: true
+              restart_required: false
+              description: 单个 ingest 批次允许的最大条目数。
+
+    ConfigSchema:
+      type: object
+      description: |
+        配置的机器可读元数据（与 `Config` 同版本）。客户端据此自动渲染配置表单、
+        隐藏 `secret` 字段、把 `mutable=false` 的字段置为只读。
+        `revision` 与 `Config.revision` 对齐，可用于判断元数据是否过期。
+      required:
+        - revision
+        - sections
+      properties:
+        revision:
+          type: string
+          description: 与同一时刻 `Config.revision` 相同的版本标记。
+        sections:
+          type: array
+          description: 配置分组列表，顺序即建议的表单展示顺序。
+          items:
+            $ref: '#/components/schemas/ConfigSectionSpec'
+      examples:
+        - revision: '42'
+          sections:
+            - key: ingest
+              title: 采集通道
+              description: 采集器写入通道的限制与保留期。
+              fields:
+                - path: /ingest/batch_max
+                  type: integer
+                  default: 500
+                  min: 1
+                  max: 10000
+                  secret: false
+                  mutable: true
+                  restart_required: false
+                  description: 单个 ingest 批次允许的最大条目数。

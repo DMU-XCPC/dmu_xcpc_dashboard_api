@@ -1,0 +1,753 @@
+components:
+  schemas:
+    # ------------------------------------------------------------------ 权限
+    Scope:
+      type: string
+      description: |
+        能力字符串，形如 `资源:动作`，例如 `member:manage`、`ingest:write`。
+        权限模型不使用固定角色：角色只是标签，授权单位始终是 scope 列表。
+        允许的通配写法只有两种：`<资源>:*`（该资源全部动作）与 `*`（平台管理员）。
+      oneOf:
+        - const: '*'
+        - pattern: '^[a-z][a-z0-9_]*:(\*|[a-z][a-z0-9_]*)$'
+      examples:
+        - member:manage
+
+    ScopeSet:
+      type: array
+      description: scope 列表；重复项会被服务端去重后保存。
+      uniqueItems: true
+      items:
+        $ref: '#/components/schemas/Scope'
+      examples:
+        - - account:self
+          - member:read
+          - oj:read
+
+    Label:
+      type: string
+      description: |
+        自由文本标签，用于组织、筛选与批量套用 scope 模板，例如 `2023`、`bot`、
+        `team-captain`、`alumni`。
+        **标签本身不授予任何权限，也不决定成员资格**；成员资格来自社团注册记录
+        `ClubMembership`。
+      minLength: 1
+      maxLength: 40
+      pattern: '^[a-z0-9][a-z0-9._:-]*$'
+      examples:
+        - member
+
+    LabelSet:
+      type: array
+      description: 标签列表。
+      uniqueItems: true
+      items:
+        $ref: '#/components/schemas/Label'
+      examples:
+        - - member
+          - '2023'
+
+    # ------------------------------------------------------------------ 档案
+    AccountStatus:
+      type: string
+      description: |
+        `active` 正常；`disabled` 已停用（凭证全部失效，但数据保留，
+        成员与榜单仍可引用其历史成绩）。
+      enum:
+        - active
+        - disabled
+      examples:
+        - active
+
+    # ------------------------------------------------------------ 社团身份
+    ClubCode:
+      type: string
+      description: |
+        社团身份。集训队挂靠两个社团，成员可以只注册其中一个，也可以两个都注册：
+        `safewind_software` 是海风社团软件部，英文名 Safewind；`acm_icpc` 是 ACM/ICPC 学社。
+        因为存在两份可以独立注册的名单，成员管理不能只看单一的"是否在册"，
+        也不能只看单一活跃度：名单与活跃度都要按社团分别算。
+      enum:
+        - safewind_software
+        - acm_icpc
+      examples:
+        - acm_icpc
+
+    ClubMembershipStatus:
+      type: string
+      description: |
+        某个社团身份的状态。只有 `active` 计入该社团的在册名单；`inactive` 表示
+        暂停或休会但保留记录，`alumni` 表示已退出该社团。一个社团的历史状态不影响
+        另一个社团的记录。
+      enum:
+        - active
+        - inactive
+        - alumni
+      examples:
+        - active
+
+    ClubMembership:
+      type: object
+      description: |
+        一条社团注册记录，`(主体, 社团)` 唯一。写入口是
+        `PUT /members/{member_id}/clubs`：整体替换，请求中未出现的社团会被置为
+        `alumni` 而不是删除，以便保留历史。
+      required:
+        - club
+        - status
+        - registered_at
+      properties:
+        club:
+          $ref: '#/components/schemas/ClubCode'
+        status:
+          $ref: '#/components/schemas/ClubMembershipStatus'
+        registered_at:
+          type: string
+          format: date
+          description: 在该社团的注册日期。
+          examples:
+            - '2023-09-20'
+        ended_at:
+          oneOf:
+            - type: string
+              format: date
+            - type: 'null'
+          description: 退出或暂停日期；状态为 `active` 时为 `null`。
+          examples:
+            - null
+        role:
+          oneOf:
+            - type: string
+            - type: 'null'
+          description: 社团内角色，自由文本，例如 `部长`、`干事`、`成员`。
+          maxLength: 40
+          examples:
+            - 干事
+        membership_no:
+          oneOf:
+            - type: string
+            - type: 'null'
+          description: 社团系统里的登记号；没有则为 `null`。
+          maxLength: 40
+          examples:
+            - HF-2023-017
+
+      examples:
+        - club: acm_icpc
+          status: active
+          registered_at: '2024-03-01'
+          ended_at: null
+          role: 成员
+    PrincipalProfileWrite:
+      type: object
+      description: |
+        可写的社团档案字段，用于创建与更新主体。**只读字段不在本结构里**：
+        `grade` 由 `enrollment_year` 派生，`club_memberships` 是社团注册记录，
+        两者都只出现在响应里。要改社团身份请用 `PUT /members/{member_id}/clubs`。
+      properties:
+        student_id:
+          type: string
+          description: 学号。唯一（`unique` 由服务端保证，冲突返回 `409`）。
+          maxLength: 32
+          examples:
+            - '2220210000'
+        enrollment_year:
+          type: integer
+          minimum: 2000
+          maximum: 2100
+          description: 入学年份；`grade` 由它派生。
+          examples:
+            - 2022
+        major:
+          type: string
+          description: 专业。
+          maxLength: 80
+          examples:
+            - 计算机科学与技术
+        email:
+          type: string
+          format: email
+          description: 联系邮箱。
+          examples:
+            - alice@example.edu.cn
+        phone:
+          type: string
+          description: 联系电话。
+          maxLength: 32
+          examples:
+            - '13800000000'
+        qq:
+          type: string
+          description: QQ 号。
+          maxLength: 20
+          examples:
+            - '10001'
+        remark:
+          type: string
+          description: 备注。
+          maxLength: 200
+          examples:
+            - 2024 级队长
+      examples:
+        - student_id: '2220210000'
+          enrollment_year: 2022
+          major: 计算机科学与技术
+          email: alice@example.edu.cn
+          phone: '13800000000'
+          qq: '10001'
+
+    PrincipalProfile:
+      type: object
+      description: |
+        填表用的社团档案。全部字段可选；`grade` 由 `enrollment_year` 派生，只读。
+        成员名单导出（`POST /roster/exports`）默认包含这些字段。
+
+        **社团身份是一对多记录，不是布尔值**：集训队挂靠两个社团——海风社团软件部
+        `safewind_software` 与 ACM/ICPC 学社 `acm_icpc`——成员可以只注册其中一个，
+        也可以两个都注册。因此这里用 `club_memberships` 记录每个社团各自的注册日期、
+        状态与角色，而不是一个"是否注册"开关。
+      properties:
+        student_id:
+          type: string
+          description: 学号。唯一（`unique` 由服务端保证，冲突返回 `409`）。
+          maxLength: 32
+          examples:
+            - '2220210000'
+        enrollment_year:
+          type: integer
+          minimum: 1990
+          maximum: 2100
+          description: 入学年份，例如 2022，年级由它派生。
+          examples:
+            - 2022
+        grade:
+          type: string
+          readOnly: true
+          description: |
+            派生年级标签，只读，如 `2022级`。由 `enrollment_year` 与当前学年计算，
+            客户端提交的值一律被忽略。
+          examples:
+            - 2022级
+        major:
+          type: string
+          description: 专业。
+          maxLength: 80
+          examples:
+            - 计算机科学与技术
+        masked_fields:
+          type: array
+          readOnly: true
+          description: |
+            本次响应里被**脱敏**的字段名。学号、邮箱、电话、QQ 属于个人身份信息（PII），
+            缺少 `member:read_pii` 且不是在读自己时，服务端把这些字段返回为 `null`，
+            并在这里列出它们的名字，避免"到底是没填还是不让看"的歧义。
+            数组为空表示没有字段被隐藏。字段本身由本人或持有 `member:read_pii` 的主体填写与查看。
+          items:
+            type: string
+          examples:
+            - - student_id
+              - email
+              - phone
+              - qq
+        club_memberships:
+          type: array
+          readOnly: true
+          description: |
+            该主体在各个社团的注册记录，每个社团至多一条；空数组表示未在任何社团注册。
+            **只读**：写入口是 `PUT /members/{member_id}/clubs`，整体替换；
+            `PATCH /members/{member_id}` 不接受本字段，避免同一份数据两处可写。
+          items:
+            $ref: '#/components/schemas/ClubMembership'
+          examples:
+            - - club: safewind_software
+                status: active
+                registered_at: '2023-09-20'
+                role: 干事
+              - club: acm_icpc
+                status: active
+                registered_at: '2024-03-01'
+                role: 成员
+        email:
+          type: string
+          format: email
+          description: 联系邮箱。
+          examples:
+            - alice@example.edu.cn
+        phone:
+          type: string
+          description: 联系电话，仅对 `member:read` 及以上可见。
+          maxLength: 32
+          examples:
+            - '13800000000'
+        qq:
+          type: string
+          description: QQ 号，供 QQ 机器人 @ 使用。
+          maxLength: 20
+          examples:
+            - '10001'
+        remark:
+          type: string
+          description: 备注。
+          maxLength: 500
+
+      examples:
+        - student_id: '2220210000'
+          enrollment_year: 2022
+          grade: 2022级
+          major: 计算机科学与技术
+          club_memberships:
+            - club: acm_icpc
+              status: active
+              registered_at: '2024-03-01'
+              role: 成员
+            - club: safewind_software
+              status: active
+              registered_at: '2023-09-20'
+              role: 干事
+          email: alice@example.edu.cn
+          phone: '13800000000'
+          qq: '10001'
+    Principal:
+      type: object
+      description: |
+        主体：一切能访问系统的身份，人类账号与非人类账号（机器人、采集器、Agent）
+        统一用本结构表示，仅 `kind` 与标签不同。
+      required:
+        - id
+        - username
+        - display_name
+        - kind
+        - labels
+        - scopes
+        - status
+        - created_at
+        - updated_at
+        - revision
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        username:
+          type: string
+          description: 人类主体是登录名，service 主体是标识名。创建后不可修改。
+          minLength: 3
+          maxLength: 32
+          pattern: '^[a-z0-9][a-z0-9._-]*$'
+          examples:
+            - alice
+        display_name:
+          type: string
+          description: 展示名，可含中文。
+          minLength: 1
+          maxLength: 64
+          examples:
+            - 张三
+        kind:
+          $ref: './common.yaml#/components/schemas/PrincipalKind'
+        labels:
+          $ref: '#/components/schemas/LabelSet'
+        scopes:
+          $ref: '#/components/schemas/ScopeSet'
+        profile:
+          $ref: '#/components/schemas/PrincipalProfile'
+        status:
+          $ref: '#/components/schemas/AccountStatus'
+        disabled_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 停用时刻；`status=active` 时为 `null`。
+        last_active_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: |
+            最近一次"有意义的活跃"：成功登录或携带凭证的 API 调用（读操作也算），
+            或该主体的 OJ 绑定在最近一次采集中有新提交。
+            成员名单导出据此排除长期未活跃成员，默认 365 天。
+        created_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        updated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        revision:
+          type: string
+          description: 版本标记，与 `ETag` 值一致；写入时可用 `If-Match` 做乐观并发控制。
+          examples:
+            - '17'
+      examples:
+        - id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          username: alice
+          display_name: 张三
+          kind: human
+          labels:
+            - member
+            - '2022'
+          scopes:
+            - account:self
+            - member:read
+          profile:
+            student_id: '2220210000'
+            enrollment_year: 2022
+            grade: 2022级
+            major: 计算机科学与技术
+            club_memberships:
+              - club: acm_icpc
+                status: active
+                registered_at: '2023-09-20'
+                role: 成员
+            email: alice@example.edu.cn
+          status: active
+          disabled_at: null
+          last_active_at: '2024-05-06T07:08:09.123Z'
+          created_at: '2023-09-01T02:00:00.000Z'
+          updated_at: '2024-05-06T07:08:09.123Z'
+          revision: '17'
+
+    # ------------------------------------------------------------------ 凭证
+    CredentialKind:
+      type: string
+      description: |
+        `session`：人类登录得到的短期会话令牌（配 `refresh_token` 轮换）。
+        `api_key`：管理员/自助签发的长期密钥，用于机器人、采集器与二次开发。
+      enum:
+        - session
+        - api_key
+      examples:
+        - api_key
+
+    Credential:
+      type: object
+      description: |
+        凭证的元信息。**明文密钥只在签发响应中出现一次**，之后任何接口都不再返回。
+      required:
+        - id
+        - principal_id
+        - kind
+        - name
+        - scopes
+        - created_at
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        principal_id:
+          $ref: './common.yaml#/components/schemas/Id'
+        kind:
+          $ref: '#/components/schemas/CredentialKind'
+        name:
+          type: string
+          description: 人类可读用途说明，便于在列表中识别，例如 `qq-bot`、`cf-crawler`。
+          minLength: 1
+          maxLength: 64
+          examples:
+            - qq-bot
+        prefix:
+          type: string
+          description: |
+            密钥明文的前 8 个字符（`xcp_` 前缀 + 随机段），用于人工比对与排障；
+            不足以推导出完整密钥。
+          examples:
+            - xcp_7f3a
+        scopes:
+          $ref: '#/components/schemas/ScopeSet'
+        created_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        created_by:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/PrincipalRef'
+            - type: 'null'
+          description: 签发者；自助签发时即本人。
+        expires_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 过期时刻；`null` 表示不过期，仅 `api_key` 允许。
+        last_used_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 最近一次使用时刻，用于识别僵尸密钥（写入延迟 ≤ 5 分钟）。
+        revoked_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 撤销时刻。撤销后立即失效，多实例部署下的传播延迟不超过 60 秒。
+      examples:
+        - id: cred_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          kind: api_key
+          name: qq-bot
+          prefix: xcp_7f3a
+          scopes:
+            - announcement:write
+            - announcement:publish
+          created_at: '2024-01-02T03:04:05.000Z'
+          created_by:
+            id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            username: alice
+            display_name: 张三
+            kind: human
+          expires_at: null
+          last_used_at: '2024-05-06T07:00:00.000Z'
+          revoked_at: null
+
+    IssuedCredential:
+      description: 签发结果，包含**仅此一次**返回的明文密钥。
+      allOf:
+        - $ref: '#/components/schemas/Credential'
+        - type: object
+          required:
+            - secret
+          properties:
+            secret:
+              type: string
+              description: |
+                明文密钥。请立即保存；服务端只存哈希，丢失后只能重新签发。
+                使用方式：`Authorization: Bearer <secret>` 或 `X-API-Key: <secret>`。
+              minLength: 16
+              examples:
+                - xcp_7f3aQ0K3M7N9P2R4T6W8X0abcdef
+
+      examples:
+        - id: cred_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          kind: api_key
+          name: QQ 机器人
+          prefix: xck_7f3a
+          scopes:
+            - announcement:write
+          created_at: '2024-05-06T07:00:00.000Z'
+          secret: xck_7f3aQ0K3M7N9P2R4T6W8X0Y1Z2A3B4C5D6
+    # ------------------------------------------------------------------ 会话
+    TokenPair:
+      type: object
+      description: |
+        登录/刷新返回的令牌对。`refresh_token` **一次性使用**：每次刷新都会签发新的
+        刷新令牌；重复使用已消费的刷新令牌会被视为泄露，整条令牌族立即失效。
+      required:
+        - access_token
+        - token_type
+        - expires_in
+        - refresh_token
+        - refresh_expires_in
+        - principal
+      properties:
+        access_token:
+          type: string
+          description: '访问令牌，放入 `Authorization: Bearer` 头。默认有效期 30 分钟。'
+          examples:
+            - eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.session-opaque
+        token_type:
+          type: string
+          const: Bearer
+        expires_in:
+          type: integer
+          description: 访问令牌剩余有效秒数（相对签发时刻）。
+          examples:
+            - 1800
+        refresh_token:
+          type: string
+          description: 刷新令牌，默认有效期 30 天，单次使用。
+          examples:
+            - xcr_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+        refresh_expires_in:
+          type: integer
+          description: 刷新令牌剩余有效秒数。
+          examples:
+            - 2592000
+        principal:
+          $ref: '#/components/schemas/Principal'
+      examples:
+        - access_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.session-opaque
+          token_type: Bearer
+          expires_in: 1800
+          refresh_token: xcr_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          refresh_expires_in: 2592000
+          principal:
+            id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            username: alice
+            display_name: 张三
+            kind: human
+            labels:
+              - member
+            scopes:
+              - account:self
+            status: active
+            created_at: '2023-09-01T02:00:00.000Z'
+            updated_at: '2024-05-06T07:08:09.123Z'
+            revision: '17'
+
+    Me:
+      description: 当前主体视图：主体本体 + 当前凭证 + 实际生效的 scope 集合。
+      allOf:
+        - $ref: '#/components/schemas/Principal'
+        - type: object
+          required:
+            - effective_scopes
+          properties:
+            credential:
+              oneOf:
+                - $ref: '#/components/schemas/Credential'
+                - type: 'null'
+              description: 当前请求所用的凭证；匿名读取时为 `null`。
+            effective_scopes:
+              $ref: '#/components/schemas/ScopeSet'
+              description: |
+                主体 scopes ∩ 当前凭证 scopes，含通配展开后的结果。
+                前端据此决定按钮可见性；服务端仍会独立校验。
+
+      examples:
+        - id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          username: alice
+          display_name: 张三
+          kind: human
+          labels:
+            - member
+          scopes:
+            - account:self
+            - profile:display
+            - profile:contact
+          profile:
+            student_id: '2220210000'
+            enrollment_year: 2022
+            grade: 2022级
+            club_memberships:
+              - club: acm_icpc
+                status: active
+                registered_at: '2024-03-01'
+                role: 成员
+          status: active
+          created_at: '2023-09-01T02:00:00.000Z'
+          updated_at: '2024-05-06T07:08:09.123Z'
+          revision: '17'
+          credential:
+            id: cred_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            kind: session
+            name: Chrome on macOS
+            prefix: xcp_7f3a
+            scopes:
+              - account:self
+            created_at: '2024-05-06T06:00:00.000Z'
+            expires_at: '2024-06-05T06:00:00.000Z'
+          effective_scopes:
+            - account:self
+            - profile:display
+            - profile:contact
+    LoginRequest:
+      type: object
+      description: 登录请求：账号口令换令牌对。
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+          description: 登录名。
+          examples:
+            - alice
+        password:
+          type: string
+          format: password
+          writeOnly: true
+          minLength: 8
+          maxLength: 256
+          description: 口令明文，仅经 TLS 传输，服务端用 Argon2id 校验。
+        device_name:
+          type: string
+          description: 设备标识，写入会话凭证的 `name`，便于在列表中撤销。
+          maxLength: 64
+          examples:
+            - Chrome on macOS
+
+      examples:
+        - username: alice
+          password: correct-horse-battery-staple
+          device_name: Web
+    RefreshRequest:
+      type: object
+      description: 刷新请求：携带**单次使用**的刷新令牌换取新的令牌对。
+      required:
+        - refresh_token
+      properties:
+        refresh_token:
+          type: string
+          description: 上一次登录/刷新得到的刷新令牌。
+          examples:
+            - xcr_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+
+      examples:
+        - refresh_token: xcr_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+    LogoutRequest:
+      type: object
+      description: 缺省登出当前访问令牌对应的会话；给 `refresh_token` 可精确撤销该会话。
+      properties:
+        refresh_token:
+          type: string
+          description: 要撤销的会话的刷新令牌；省略时撤销当前访问令牌所属会话。
+        all_sessions:
+          type: boolean
+          default: false
+          description: 为 `true` 时撤销该主体的全部 `session` 凭证，不含 `api_key`。
+
+      examples:
+        - all_sessions: false
+    UpdateMeRequest:
+      type: object
+      description: |
+        自助修改自己的展示名与档案。`username`、`kind`、`scopes`、`labels` 不可自助修改；
+        社团身份也不在这里改，走 `PUT /members/{member_id}/clubs`。
+      minProperties: 1
+      properties:
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        profile:
+          $ref: '#/components/schemas/PrincipalProfileWrite'
+
+      examples:
+        - display_name: 张三
+          profile:
+            major: 软件工程
+            phone: '13900000000'
+    ResetPasswordRequest:
+      type: object
+      description: |
+        管理员设置或重置某个主体的口令。长度需满足 `Config.auth.password_min_length`，
+        默认 12。管理员不需要知道旧口令。
+      required:
+        - password
+      properties:
+        password:
+          type: string
+          format: password
+          writeOnly: true
+          minLength: 8
+          maxLength: 256
+          description: 新口令；服务端按 `Config.auth.password_min_length` 校验，过短返回 `422`。
+      examples:
+        - password: correct-horse-battery-staple
+
+    ChangePasswordRequest:
+      type: object
+      description: 修改口令请求；成功后除当前会话外的全部 `session` 凭证失效。
+      required:
+        - current_password
+        - new_password
+      properties:
+        current_password:
+          type: string
+          format: password
+          writeOnly: true
+        new_password:
+          type: string
+          format: password
+          writeOnly: true
+          minLength: 12
+          maxLength: 256
+          description: |
+            至少 12 字符。修改成功后，除当前会话外的所有 `session` 凭证立即失效
+            （`api_key` 不受影响）。
+
+      examples:
+        - current_password: correct-horse-battery-staple
+          new_password: a-much-longer-new-passphrase

@@ -1,0 +1,323 @@
+components:
+  schemas:
+    # ------------------------------------------------------------------ 健康检查
+    HealthCheck:
+      type: object
+      description: |
+        单个依赖或子系统的健康状态。`latency_ms` 只在做过主动探测时给出；
+        `message` 在非 `ok` 时说明原因（已脱敏，不含连接串与凭证）。
+      required:
+        - name
+        - status
+      properties:
+        name:
+          type: string
+          description: 检查项名称，例如 `database`、`cache`、`crawler`、`sse`。
+        status:
+          type: string
+          enum:
+            - ok
+            - degraded
+            - down
+          description: 检查项状态；`degraded` 表示仍可用但性能/覆盖率下降。
+        latency_ms:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: 'null'
+          description: 探测延迟（毫秒）；未探测时为 `null`。
+        message:
+          oneOf:
+            - type: string
+            - type: 'null'
+          description: 补充说明；`status=ok` 时通常为 `null`。
+      examples:
+        - name: database
+          status: ok
+          latency_ms: 3
+          message: null
+
+    HealthStatus:
+      type: object
+      description: |
+        存活探针结果。`status=ok|degraded` 都返回 `200`（进程活着但可能降级，
+        供探针区分"活着但降级"与"已死"）；`status=down` 返回 `503` 并复用
+        Problem 响应体。
+      required:
+        - status
+        - version
+        - uptime_seconds
+        - time
+        - checks
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+            - degraded
+            - down
+          description: 聚合状态：任一检查 `down` 则为 `down`，否则任一 `degraded` 则为 `degraded`。
+        version:
+          type: string
+          description: 服务端实现版本（构建号）。
+        uptime_seconds:
+          type: integer
+          minimum: 0
+          description: 进程已运行秒数。
+        time:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        checks:
+          type: array
+          description: 各项检查的明细。
+          items:
+            $ref: '#/components/schemas/HealthCheck'
+      examples:
+        - status: ok
+          version: 1.4.2+9f1c2ab
+          uptime_seconds: 86400
+          time: '2024-05-06T07:08:09.123Z'
+          checks:
+            - name: database
+              status: ok
+              latency_ms: 3
+              message: null
+            - name: cache
+              status: ok
+              latency_ms: 1
+              message: null
+
+    ReadyStatus:
+      type: object
+      description: |
+        就绪探针结果。`ready=false` 时整体返回 `503 service_unavailable`，
+        响应体为 Problem（`detail` 列出未就绪的依赖），而不是本结构。
+      required:
+        - ready
+        - checks
+      properties:
+        ready:
+          type: boolean
+          description: 是否已就绪，可接收流量；等价于所有必需依赖均非 `down`。
+        checks:
+          type: array
+          description: 就绪检查明细。
+          items:
+            $ref: '#/components/schemas/HealthCheck'
+      examples:
+        - ready: true
+          checks:
+            - name: database
+              status: ok
+              latency_ms: 3
+              message: null
+
+    # ------------------------------------------------------------------ 审计
+    AuditOutcome:
+      type: string
+      description: |
+        操作结果：`success` 成功、`denied` 因权限不足被拒绝（403/401）、
+        `failure` 因校验或内部错误失败（4xx 其它/5xx）。
+      enum:
+        - success
+        - denied
+        - failure
+      examples:
+        - success
+
+    ActorKind:
+      type: string
+      description: |
+        操作者类别：`human` 自然人、`service` 机器人/采集器/Agent、
+        `system` 系统自身（定时任务、后台重建、配置重载）。
+      enum:
+        - human
+        - service
+        - system
+      examples:
+        - human
+
+    AuditTarget:
+      type: object
+      description: 被操作资源的轻量引用；`id` 可能为空，例如批量导入、全局配置变更。
+      properties:
+        resource:
+          type: string
+          description: 资源集合名，例如 `announcements`、`quotas`、`config`。
+        id:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Id'
+            - type: 'null'
+          description: 目标资源 id；无单一目标时为 `null`。
+        label:
+          oneOf:
+            - type: string
+            - type: 'null'
+          description: 便于人工识别的标签，例如公告标题。
+      examples:
+        - resource: announcements
+          id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          label: 2024 暑期集训安排
+
+    AuditLog:
+      type: object
+      description: |
+        一条审计记录。审计写入是**同步**的：业务响应返回时该记录已落库，
+        因此紧接着的 `GET /audit-logs` 一定能读到它。
+        `metadata` 在写入前已脱敏（口令、令牌、密钥、完整请求体不落库）。
+      required:
+        - id
+        - at
+        - actor_kind
+        - action
+        - outcome
+        - request_id
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        actor:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/PrincipalRef'
+            - type: 'null'
+          description: 操作主体；`actor_kind=system` 时为 `null`。
+        actor_kind:
+          $ref: '#/components/schemas/ActorKind'
+        action:
+          type: string
+          description: 动作名，形如 `<资源>.<动作>`，例如 `announcement.publish`、`config.patch`。
+        target:
+          oneOf:
+            - $ref: '#/components/schemas/AuditTarget'
+            - type: 'null'
+          description: 被操作资源；无具体目标时为 `null`。
+        outcome:
+          $ref: '#/components/schemas/AuditOutcome'
+        status_code:
+          oneOf:
+            - type: integer
+              minimum: 100
+              maximum: 599
+            - type: 'null'
+          description: 该次操作最终返回的 HTTP 状态码。
+        scope_used:
+          oneOf:
+            - type: string
+            - type: 'null'
+          description: 通过校验所用的 scope，例如 `announcement:publish`；认证失败时为 `null`。
+        ip:
+          oneOf:
+            - type: string
+            - type: 'null'
+          description: 客户端 IP（已按隐私策略截断）。
+        user_agent:
+          oneOf:
+            - type: string
+            - type: 'null'
+          description: 客户端 User-Agent。
+        request_id:
+          type: string
+          description: 与响应头 `X-Request-Id` 相同的排障标识，可据此关联日志。
+        metadata:
+          type: object
+          additionalProperties: true
+          description: 动作相关的结构化细节（已脱敏）；字段随 `action` 而异，客户端应忽略未知字段。
+      examples:
+        - id: aud_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          at: '2024-05-06T07:08:09.123Z'
+          actor:
+            id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            username: alice
+            display_name: 张三
+            kind: human
+          actor_kind: human
+          action: announcement.publish
+          target:
+            resource: announcements
+            id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            label: 2024 暑期集训安排
+          outcome: success
+          status_code: 200
+          scope_used: announcement:publish
+          ip: 2001:db8::1
+          user_agent: Mozilla/5.0
+          request_id: req_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          metadata:
+            channel_count: 2
+
+    PagedAuditLog:
+      description: 审计日志的游标分页结果（与 `GET /audit-logs` 一致）。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/CursorPageMeta'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页的审计记录，按 `at` 降序（新的在前）。
+              items:
+                $ref: '#/components/schemas/AuditLog'
+      examples:
+        - has_more: false
+          next_cursor: null
+          items:
+            - id: aud_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              at: '2024-05-06T07:08:09.123Z'
+              actor:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              actor_kind: human
+              action: announcement.publish
+              target:
+                resource: announcements
+                id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                label: 2024 暑期集训安排
+              outcome: success
+              status_code: 200
+              scope_used: announcement:publish
+              ip: 2001:db8::1
+              user_agent: Mozilla/5.0
+              request_id: req_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              metadata: {}
+
+    # ------------------------------------------------------------------ 异步任务
+    PagedJob:
+      description: 异步任务的偏移分页结果。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/PageMeta'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页的任务。
+              items:
+                $ref: './common.yaml#/components/schemas/Job'
+      examples:
+        - page: 1
+          size: 20
+          total: 1
+          has_next: false
+          items:
+            - id: job_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              kind: roster_export
+              state: succeeded
+              progress:
+                percent: 100
+              result:
+                export_id: exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                row_count: 87
+              error: null
+              created_at: '2024-05-06T07:08:09.123Z'
+              started_at: '2024-05-06T07:08:09.500Z'
+              finished_at: '2024-05-06T07:08:11.000Z'
+              expires_at: '2024-05-07T07:08:09.123Z'
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human

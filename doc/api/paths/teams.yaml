@@ -1,0 +1,566 @@
+teams:
+  get:
+    tags:
+      - teams
+    operationId: listTeams
+    summary: 列出队伍
+    description: |
+      **权限**：需要 `team:read`；缺少该 scope 返回 `403 insufficient_scope`。
+
+      **语义**：偏移分页返回队伍。`season` 精确匹配，例如 `2024-2025`，省略时返回
+      全部赛季；`q` 模糊匹配 `name`/`short_name`；`member_id` 只返回该成员当前赛季
+      所属的队伍；`label` 可重复，多个标签为 AND；`updated_since` 只返回 `updated_at`
+      严格晚于该时刻的队伍。列表只给 `member_ids` 与 `member_count`，**不含内联
+      `members`**，需要成员明细时取 `GET /teams/{team_id}`。
+
+      **时序**：队伍元数据与成员名单强一致，返回结果已包含此前已提交的写入。
+
+      **副作用**：无，只读。**幂等**：是。**缓存**：可缓存（`x-cacheable`），
+      可结合 `updated_since` 做增量同步（队伍资源带 `updated_at` 与 `revision`）。
+
+      **错误分支**：未知 `sort`/`season` 格式或非法 `updated_since` → `400 bad_request`；
+      `member_id` 指向不存在的成员时返回空列表而非 `404`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: season
+        in: query
+        required: false
+        description: 赛季精确匹配，形如 `2024-2025`；省略时跨全部赛季。
+        schema:
+          type: string
+          pattern: '^\d{4}-\d{4}$'
+        example: 2024-2025
+      - name: q
+        in: query
+        required: false
+        description: 模糊搜索：匹配队伍名与短名（大小写不敏感）。
+        schema:
+          type: string
+          maxLength: 64
+        example: DMU
+      - name: member_id
+        in: query
+        required: false
+        description: 只返回该成员当前赛季所属的队伍。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: label
+        in: query
+        required: false
+        description: 标签过滤，可重复出现；多个标签之间为 AND（必须同时具备）。
+        style: form
+        explode: true
+        schema:
+          type: array
+          maxItems: 20
+          items:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/Label
+        example:
+          - '2024'
+          - a-team
+      - $ref: ../components/parameters/common.yaml#/components/parameters/UpdatedSince
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Page
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Size
+      - name: sort
+        in: query
+        required: false
+        description: 排序键：`name`，默认，按当前 season 内的名字或 `created_at`。
+        schema:
+          type: string
+          enum:
+            - name
+            - created_at
+            - updated_at
+          default: name
+        example: name
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Order
+    responses:
+      '200':
+        description: 队伍的分页结果。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/roster.yaml#/components/schemas/PagedTeam
+            example:
+              page: 1
+              size: 20
+              total: 8
+              has_next: false
+              items:
+                - id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  name: DMU-1
+                  short_name: DMU-1
+                  season: 2024-2025
+                  labels:
+                    - '2024'
+                    - a-team
+                  captain_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  external_id: ICPC-2024-CN-0123
+                  member_ids:
+                    - acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  member_count: 1
+                  created_at: '2024-01-10T02:00:00.000Z'
+                  updated_at: '2024-05-06T07:08:09.123Z'
+                  revision: '4'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+  post:
+    tags:
+      - teams
+    operationId: createTeam
+    summary: 新建队伍
+    description: |
+      **权限**：需要 `team:manage`；缺少该 scope 返回 `403 insufficient_scope`。
+
+      **语义**：创建队伍并返回 `201` 与 `Location: /teams/{team_id}`。`season` 省略时
+      归入 `GET /meta` 的 `current_season`（即 `Config.roster.current_season`），
+      显式给出则以给值为准（补录往届队伍用）。**同一 season 内 `name` 唯一**：重名返回
+      `409 conflict`（并发创建同名队伍时由唯一约束兜底，其中的失败方同样得到 `409`）。
+      新建队伍的成员名单为空，需随后调用 `PUT /teams/{team_id}/members` 设置。
+
+      **幂等**：必须携带 `Idempotency-Key`；同一键在保留期内重放返回**首次**创建的
+      队伍与 `201`，并带 `Idempotency-Replayed: true`，不会产生第二支队伍；
+      请求体不同则返回 `409 idempotency_key_reused`。
+
+      **副作用**：写入审计记录；队伍立即出现在 `GET /teams` 中（强一致）。
+
+      **错误分支**：`name` 为空或超长、`season` 不符合 `YYYY-YYYY` → `422 validation_failed`；
+      `external_id` 已被其它队伍占用 → `409 conflict`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/roster.yaml#/components/schemas/CreateTeamRequest
+          example:
+            name: DMU-1
+            short_name: DMU-1
+            season: 2024-2025
+            description: 2024 赛季一队。
+            labels:
+              - '2024'
+              - a-team
+            external_id: ICPC-2024-CN-0123
+    responses:
+      '201':
+        description: 队伍已创建。
+        headers:
+          Location:
+            $ref: ../components/headers/common.yaml#/components/headers/Location
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/roster.yaml#/components/schemas/Team
+            example:
+              id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              name: DMU-1
+              short_name: DMU-1
+              season: 2024-2025
+              description: 2024 赛季一队。
+              captain_id: null
+              external_id: ICPC-2024-CN-0123
+              labels:
+                - '2024'
+                - a-team
+              member_ids: []
+              member_count: 0
+              created_at: '2024-05-06T07:08:09.123Z'
+              updated_at: '2024-05-06T07:08:09.123Z'
+              revision: '1'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+team:
+  get:
+    tags:
+      - teams
+    operationId: getTeam
+    summary: 获取队伍详情
+    description: |
+      **权限**：需要 `team:read`。
+
+      **PII 脱敏**：内联 `members[].student_id` 属于个人身份信息，读自己或持有
+      `member:read_pii` 时原样返回，否则为 `null` 并在 `members[].masked_fields` 里列出。
+
+      **语义**：返回队伍本体，并**同时**给出 `member_ids` 与内联 `members`。
+      两者表示同一集合、顺序一致、长度相等（都等于 `member_count`）：
+      `member_ids` 便于客户端做集合比较与增量 diff，`members` 直接提供角色、
+      `joined_at`、冗余的 `student_id`/`enrollment_year` 以便一次渲染队伍表。
+      客户端不应假设二者可能不一致——出现不一致即为服务端缺陷。
+
+      **缓存**：返回 `ETag`（与 `revision` 一致）；`If-None-Match` 命中返回 `304`
+      （队伍成员名单变化会推进 `revision`，因此 `304` 可安全用于缓存整支队伍）。
+
+      **时序**：强一致，包含此前所有已提交的成员变更。
+
+      **副作用**：无，只读。**幂等**：是。
+
+      **错误分支**：队伍不存在或对该主体不可见 → `404 not_found`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: team_id
+        in: path
+        required: true
+        description: 队伍 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 队伍详情，含内联成员。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/roster.yaml#/components/schemas/Team
+            example:
+              id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              name: DMU-1
+              short_name: DMU-1
+              season: 2024-2025
+              description: 2024 赛季一队。
+              captain_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              external_id: ICPC-2024-CN-0123
+              labels:
+                - '2024'
+                - a-team
+              member_ids:
+                - acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              member_count: 1
+              members:
+                - principal:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  role: captain
+                  joined_at: '2024-01-10T02:00:00.000Z'
+                  student_id: '2220210000'
+                  enrollment_year: 2022
+              created_at: '2024-01-10T02:00:00.000Z'
+              updated_at: '2024-05-06T07:08:09.123Z'
+              revision: '4'
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+  patch:
+    tags:
+      - teams
+    operationId: updateTeam
+    summary: 修改队伍元信息
+    description: |
+      **权限**：需要 `team:manage`。
+
+      **赛季**：省略 `season` 时用 `GET /meta` 的 `current_season`（= `Config.roster.current_season`）；
+      显式给出则以给值为准，用于补录往届队伍。
+
+      **语义**：合并式更新队伍元信息——只覆盖请求中出现的字段，未出现的保持不变。
+      **本接口不修改成员名单**：成员替换必须走 `PUT /teams/{team_id}/members`；
+      请求体里出现 `member_ids`/`members` 会被忽略或返回 `422 validation_failed`。
+      改名（或切换 `season`）后按目标 season 重新做重名校验，冲突返回 `409 conflict`。
+
+      **并发**：支持 `If-Match` + `revision`；与当前 `ETag` 不一致返回
+      `412 precondition_failed`，例如另一管理员刚改过成员名单。省略 `If-Match`
+      时为 last-write-wins。
+
+      **幂等**：必须携带 `Idempotency-Key`。**副作用**：更新 `updated_at`/`revision`，
+      写审计记录；队伍立即对新读取可见（强一致）。
+
+      **错误分支**：空请求体 `{}` → `422 validation_failed`；队伍不存在 → `404 not_found`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: team_id
+        in: path
+        required: true
+        description: 队伍 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/roster.yaml#/components/schemas/UpdateTeamRequest
+          example:
+            short_name: DMU-A
+            labels:
+              - '2024'
+              - a-team
+    responses:
+      '200':
+        description: 更新后的队伍详情。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/roster.yaml#/components/schemas/Team
+            example:
+              id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              name: DMU-1
+              short_name: DMU-A
+              season: 2024-2025
+              labels:
+                - '2024'
+                - a-team
+              captain_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              member_ids:
+                - acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              member_count: 1
+              created_at: '2024-01-10T02:00:00.000Z'
+              updated_at: '2024-05-06T07:50:00.000Z'
+              revision: '5'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+  delete:
+    tags:
+      - teams
+    operationId: deleteTeam
+    summary: 删除队伍
+    description: |
+      **权限**：需要 `team:manage`。
+
+      **语义**：删除队伍（软删除，历史榜单与已审核名额认领仍可引用其名字快照）。
+      只删除队伍本身，**不删除成员主体**。
+
+      **前置条件**：若该队伍存在**非 `withdrawn`/`rejected` 的名额认领**
+      ，即 `pending` 或 `approved` 的认领，删除被拒绝并返回 `409 conflict`；
+      调用方需先处理这些名额（撤回认领或由管理员审核为 `rejected`）后重试。
+
+      **幂等**：必须携带 `Idempotency-Key`。删除是**幂等**的：重复调用（以及删除一个
+      已不存在或从未存在的队伍）都返回 `204`，客户端可安全重试；**不可撤销**，
+      没有"恢复队伍"端点，需要恢复时重新创建队伍并重设成员。
+
+      **副作用**：队伍立即从 `GET /teams` 消失；写审计记录。
+      **时序**：强一致，响应返回时删除已生效。
+
+      **错误分支**：存在进行中的名额认领 → `409 conflict`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: team_id
+        in: path
+        required: true
+        description: 队伍 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    responses:
+      '204':
+        $ref: ../components/responses/common.yaml#/components/responses/NoContent
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+teamMembers:
+  put:
+    tags:
+      - teams
+    operationId: setTeamMembers
+    summary: 替换队伍成员名单
+    description: |
+      **权限**：需要 `team:manage`。
+
+      **语义**：**全量替换**队伍成员名单，不是增量：请求体 `members` 即替换后的
+      最终名单，未出现的成员被移出队伍；被移出后再次加入视为新加入，`joined_at` 会重置；
+      留任成员的 `joined_at` 保持不变。`role` 默认 `member`。
+
+      **前置条件与冲突分支**：
+      - `principal_id` 不在任何社团（`clubs` 为空）→ `409 conflict`；
+        `coach` 角色同样要求该主体存在，可先用 `PUT /members/{member_id}/clubs` 为其登记社团。
+      - 同一 season 内该成员已在**另一支**队伍中 → `409 conflict`，需先将其从原队伍移除；
+      - 人数超过服务端上限，默认 12，含教练→ `422 unprocessable_entity`；
+      - 出现重复 `principal_id`、两个 `captain`、或队伍不存在 → `422`/`404`。
+
+      发生任一冲突时**整个替换失败**，名单保持请求前状态，不做部分替换。
+
+      **并发**：支持 `If-Match` + `revision`；成员名单变更会推进 `revision`，
+      不匹配返回 `412 precondition_failed`。**幂等**：必须携带 `Idempotency-Key`；
+      重复提交同一份名单结果收敛，`joined_at` 不变，但每次都会推进 `revision`。
+
+      **副作用**：重置队伍的 `captain_id`，取 `role=captain` 的成员，无则 `null`；
+      写审计记录；变更立即对 `GET /teams/{team_id}` 与名额认领资格立即生效，强一致。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: team_id
+        in: path
+        required: true
+        description: 队伍 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/roster.yaml#/components/schemas/SetTeamMembersRequest
+          example:
+            members:
+              - principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                role: captain
+              - principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+                role: member
+    responses:
+      '200':
+        description: 替换后的队伍详情（`member_ids` 与 `members` 一致）。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/roster.yaml#/components/schemas/Team
+            example:
+              id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              name: DMU-1
+              short_name: DMU-1
+              season: 2024-2025
+              captain_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              labels:
+                - '2024'
+              member_ids:
+                - acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                - acc_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+              member_count: 2
+              members:
+                - principal:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  role: captain
+                  joined_at: '2024-01-10T02:00:00.000Z'
+                  student_id: '2220210000'
+                  enrollment_year: 2022
+                - principal:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+                    username: bob
+                    display_name: 李四
+                    kind: human
+                  role: member
+                  joined_at: '2024-05-06T07:55:00.000Z'
+                  student_id: '2220210001'
+                  enrollment_year: 2022
+              created_at: '2024-01-10T02:00:00.000Z'
+              updated_at: '2024-05-06T07:55:00.000Z'
+              revision: '6'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong

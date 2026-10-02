@@ -1,0 +1,56 @@
+components:
+  headers:
+    RateLimitLimit:
+      description: 当前主体在该时间窗内允许的请求数上限。
+      schema:
+        type: integer
+        minimum: 0
+      example: 1000
+
+    RateLimitRemaining:
+      description: 当前时间窗内剩余请求数；为 0 时后续请求返回 `429`。
+      schema:
+        type: integer
+        minimum: 0
+      example: 998
+
+    RateLimitReset:
+      description: 距时间窗重置的秒数。
+      schema:
+        type: integer
+        minimum: 0
+      example: 41
+
+    RetryAfter:
+      description: 建议的重试等待秒数；`429` 与 `503` 必须返回。
+      schema:
+        type: integer
+        minimum: 0
+      example: 30
+
+    ETag:
+      description: |
+        资源版本标记（强 ETag，如 `"17"`）。可直接用于 `If-None-Match` 条件读取
+        与 `If-Match` 乐观并发控制；`revision` 字段与其值一致（去引号）。
+      schema:
+        type: string
+      example: '"17"'
+
+    RequestId:
+      description: 本次请求的排障标识；错误响应体的 `request_id` 与之一致。
+      schema:
+        type: string
+      example: req_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+
+    IdempotencyReplayed:
+      description: 为 `true` 表示本次响应是幂等键重放的结果，未产生新的副作用。
+      schema:
+        type: boolean
+      example: true
+
+    Location:
+      description: 新建资源或异步任务的地址（相对 URI，如 `/jobs/job_01J8...`）。
+      schema:
+        type: string
+        format: uri-reference
+      example: /jobs/job_01J8Z5V6Q0K3M7N9P2R4T6W8X0

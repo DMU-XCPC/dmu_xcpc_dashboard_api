@@ -1,0 +1,224 @@
+streamEvents:
+  get:
+    tags:
+      - stream
+    operationId: streamEvents
+    summary: 订阅 SSE 实时事件流
+    description: |
+      建立 **Server-Sent Events** 长连接，按主题接收实时事件（公告发布、榜单重建、
+      采集进度、投递失败等）。本端点是长连接，不走分页。
+
+      **认证**：三种方式之一——`Authorization: Bearer`、`X-API-Key`，
+      或由 `POST /stream/tokens` 签发的短时流令牌（查询参数 `access_token`）。
+      浏览器 `EventSource` 无法设置请求头，必须使用 `access_token`；
+      两者同时出现时以请求头为准。
+
+      **主题与授权**：`topics` 省略时订阅全部主题。每个主题独立校验对应的
+      `*:read` scope（`announcements` → `announcement:read`，`scoreboards` →
+      `scoreboard:read`，`ingest` → `crawler:read`，`quotas` → `quota:read`，
+      `members` → `member:read`，`jobs` → `ops:read`）。
+      请求了越权主题时**不会断流，只是不会收到该主题的事件**；客户端应据实际收到的
+      事件主题调整界面。
+
+      **SSE 帧格式**（每帧以空行结束）：
+
+      ```
+      retry: 3000
+      id: 1024
+      event: announcement.published
+      data: {"id":"1024","sequence":1024,"topic":"announcements","type":"announcement.published","occurred_at":"2024-05-06T07:08:09.123Z","revision":"3","resource":{"kind":"announcement","id":"ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0"},"data":{"status":"published"}}
+
+      : hb
+      ```
+
+      - `id:` 为事件序号的十进制字符串，即 `StreamEvent.id`；`event:` 为事件类型；
+        `data:` 是 `StreamEvent` 的**单行** JSON。
+      - 首帧之前服务器发送一次 `retry: 3000`，建议客户端重连间隔 3 秒。
+      - 心跳为注释行 `: hb`，每 `config.stream.heartbeat_interval`，默认 15 秒
+        发送一次，用于保持中间代理不因空闲而断开连接。
+
+      **重放与缺口**：请求头 `Last-Event-ID` 或查询参数 `last_event_id` 指定序号后，
+      服务器从环形缓冲，默认保留最近 **1000 条事件 / 5 分钟**，取先到者补发其后的事件。
+      缓冲不足时先发一个 `stream.gap` 事件：它是**普通事件的一种**，`type` 为
+      `stream.gap`，带 `id`（等于 `to_sequence`）与 `sequence`，因此同样参与
+      `Last-Event-ID` 补发；`data` 里给出 `resync_required: true`、`from_sequence` 与
+      `to_sequence`。它不携带业务数据，只表示 `from_sequence` 到 `to_sequence` 之间的事件
+      已不可取。客户端收到后应做一次**全量刷新**，再从 `to_sequence` 之后继续增量处理。
+      **序号是"这条订阅流上交付给你的事件"的编号**，从 1 开始严格逐条 +1：服务端先按
+      令牌的 `topics` 过滤，再对你实际交付的事件编号，因此**主题过滤本身不会造成跳号**。
+      客户端发现跳号即视为 gap，应触发全量刷新。`Last-Event-ID` 补发沿用同一套编号，
+      补发范围内每条都会交付，所以补发之后编号仍然连续。
+
+      **断线与令牌过期**：`EventSource` 自动重连不会携带自定义请求头，因此只能依赖
+      `access_token`；流令牌有效期最长 10 分钟，过期后服务器返回 `401` 并关闭连接，
+      `EventSource` 不会自行恢复。客户端需在收到错误后重新 `POST /stream/tokens`
+      换取新令牌再重连。令牌**单次连接有效**，不能跨连接复用。
+
+      **背压**：客户端读取过慢导致服务端发送缓冲溢出时，服务器发送 `stream.gap`
+      并继续推送后续事件，不静默丢弃；客户端应以全量刷新对齐后再继续消费。
+
+      **限流**：同一主体的并发连接数与重连频率受限，上限由 `GET /meta` 的
+      `capabilities.max_stream_connections` 公布，超限返回 `429`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+      - streamTokenAuth: []
+    parameters:
+      - name: topics
+        in: query
+        required: false
+        style: form
+        explode: false
+        description: |
+          要订阅的主题，逗号分隔（`?topics=announcements,jobs`），可省略表示全部主题。
+          越权主题被忽略而不是报错。
+        schema:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: ../components/schemas/news.yaml#/components/schemas/StreamTopic
+        example:
+          - announcements
+          - jobs
+      - name: last_event_id
+        in: query
+        required: false
+        description: |
+          从该事件序号之后开始补发，等价于 `Last-Event-ID` 请求头。
+          省略时只推送连接之后产生的新事件。
+        schema:
+          type: string
+          maxLength: 64
+        example: '1024'
+      - name: Last-Event-ID
+        in: header
+        required: false
+        description: |
+          上次成功处理的事件序号，与 `last_event_id` 等价；两者同时出现时以本请求头为准。
+          浏览器 `EventSource` 在自动重连时会自动带上该头。
+        schema:
+          type: string
+          maxLength: 64
+        example: '1024'
+      - $ref: ../components/parameters/common.yaml#/components/parameters/AccessTokenQuery
+    responses:
+      '200':
+        description: |
+          SSE 事件流。响应体为 `text/event-stream`，包含 `id:`/`event:`/`data:` 帧与
+          `: hb` 心跳注释行；连接在客户端断开、令牌过期或服务器关闭时结束。
+          每个 `data:` 行是一个 `StreamEvent` 的单行 JSON（见响应示例）。线上长这样：
+
+          ```
+          retry: 3000
+          id: 1024
+          event: announcement.published
+          data: {"id":"1024","sequence":1024,"topic":"announcements",...}
+
+          : hb
+          ```
+        headers:
+          Cache-Control:
+            description: 事件流不得被缓存。
+            schema:
+              type: string
+            example: no-cache
+        content:
+          text/event-stream:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/StreamEvent
+              description: |
+                事件流本身是文本传输；这里声明的是**每个事件 `data:` 行的负载结构**，
+                即 `StreamEvent`。同一连接上每条事件都符合该结构。
+            example:
+              id: '1024'
+              sequence: 1024
+              topic: announcements
+              type: announcement.published
+              occurred_at: '2024-05-06T07:08:09.123Z'
+              revision: '3'
+              resource:
+                kind: announcement
+                id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              data:
+                status: published
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+streamTokens:
+  post:
+    tags:
+      - stream
+    operationId: createStreamToken
+    summary: 签发短时流令牌
+    description: |
+      仅用于 `GET /stream/events`。浏览器 `EventSource` 无法设置请求头，因此把令牌放在
+      查询参数里。
+
+      **绑定与有效期**：令牌绑定发起主体与请求里的 `topics`，用于其他主体或订阅其他主题
+      会被拒绝；有效期不超过 `PT10M`，过期后服务器返回 `401` 并关闭连接。同一主体可以同时
+      持有多枚有效令牌，**重复签发不会作废旧令牌**；令牌在建立连接时被消费，**单次连接
+      有效**，重连需要重新签发。可用的 `topics` 见 `StreamTopic`。
+
+      **非幂等**：每次成功调用都会多签出一枚有效令牌，因此本端点**不要求** `Idempotency-Key`
+      （属于全契约的豁免清单）；超时后重试最多多签一枚令牌，不影响正确性，也不会让已发放的
+      令牌失效。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/news.yaml#/components/schemas/StreamTokenRequest
+          example:
+            topics:
+              - announcements
+              - jobs
+            expires_in: 600
+            last_event_id: '1024'
+    responses:
+      '201':
+        description: |
+          令牌已签发；`url` 可直接交给 `EventSource`。令牌**绑定**发起主体与请求时的
+          `topics`：用于其他主体或订阅其他主题会被拒绝。同一主体可以同时持有多枚有效
+          令牌，重复签发不会作废旧令牌；令牌在建立连接时被消费，**单次连接有效**，
+          重连需要重新签发。同一主体的并发连接数上限见 `GET /meta` 的
+          `capabilities.max_stream_connections`，超出返回 `429`。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/StreamToken
+            example:
+              token: st_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              expires_at: '2024-05-06T07:18:09.123Z'
+              topics:
+                - announcements
+                - jobs
+              url: /api/v1/stream/events?topics=announcements,jobs&access_token=st_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: false
+    x-consistency: strong
+
+    x-idempotency-exempt: true

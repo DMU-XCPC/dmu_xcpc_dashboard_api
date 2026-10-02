@@ -1,0 +1,473 @@
+channels:
+  get:
+    tags:
+      - channels
+    operationId: listChannels
+    summary: 列出广播渠道
+    description: |
+      分页列出广播渠道。
+
+      **权限**：`channel:manage`。渠道配置属于敏感信息（目标地址、签名密钥、
+      投递错误），因此**列表也需要管理权限**，不存在公开读取或用例。
+
+      **脱敏**：响应中的目标一律为 `target_masked`，并以 `secret_set` 表示是否
+      配置了密钥；`target` 与 `secret` 明文永不回显。
+
+      **过滤**：`kind`、`enabled`、`q`，按渠道名模糊匹配。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: kind
+        in: query
+        required: false
+        description: 按渠道类型过滤。
+        schema:
+          $ref: ../components/schemas/news.yaml#/components/schemas/ChannelKind
+        example: qq_group
+      - name: enabled
+        in: query
+        required: false
+        description: 只看启用的渠道传 `true`，只看停用的传 `false`；省略时不过滤。
+        schema:
+          type: boolean
+        example: true
+      - name: q
+        in: query
+        required: false
+        description: 按渠道名模糊匹配。
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 80
+        example: 训练群
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Page
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Size
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Order
+    responses:
+      '200':
+        description: 渠道分页结果（已脱敏）。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/PagedChannel
+            example:
+              page: 1
+              size: 20
+              total: 1
+              has_next: false
+              items:
+                - id: chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  name: 2024 级训练群
+                  kind: qq_group
+                  target_masked: '****1234'
+                  secret_set: true
+                  enabled: true
+                  template: 【公告 #{{id}}】{{title}}
+                  mention_all: false
+                  rate_limit_per_minute: 30
+                  visibility_filter: members
+                  created_by:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  last_delivery_at: '2024-05-06T07:08:10.000Z'
+                  last_error: null
+                  created_at: '2024-05-01T02:00:00.000Z'
+                  updated_at: '2024-05-06T07:00:00.000Z'
+                  revision: '2'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+  post:
+    tags:
+      - channels
+    operationId: createChannel
+    summary: 创建广播渠道
+    description: |
+      新增一个广播渠道。
+
+      **权限**：`channel:manage`。
+
+      **敏感字段**：`target`（Webhook URL 或群号）与 `secret`（签名密钥）只在
+      **请求体**中出现；创建后的任何读取都只返回 `target_masked` 与 `secret_set`。
+      服务端对 `target` 加密存储并记录访问审计。
+
+      **唯一性**：同一 `name` 已存在时返回 `409 conflict`（比较时忽略首尾空白）。
+
+      **时序**：创建成功即可用于广播（强一致）；`Location` 指向新渠道，
+      `ETag` 为其 `revision`（初始为 `1`）。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/news.yaml#/components/schemas/CreateChannelRequest
+          example:
+            name: 2024 级训练群
+            kind: qq_group
+            target: '1234567890'
+            secret: webhook-signing-secret
+            enabled: true
+            template: 【公告 #{{id}}】{{title}}
+            mention_all: false
+            rate_limit_per_minute: 30
+            visibility_filter: members
+    responses:
+      '201':
+        description: 渠道已创建；响应中的目标已脱敏。
+        headers:
+          Location:
+            $ref: ../components/headers/common.yaml#/components/headers/Location
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/Channel
+            example:
+              id: chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              name: 2024 级训练群
+              kind: qq_group
+              target_masked: '****1234'
+              secret_set: true
+              enabled: true
+              template: 【公告 #{{id}}】{{title}}
+              mention_all: false
+              rate_limit_per_minute: 30
+              visibility_filter: members
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              last_delivery_at: null
+              last_error: null
+              created_at: '2024-05-06T07:08:09.123Z'
+              updated_at: '2024-05-06T07:08:09.123Z'
+              revision: '1'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+channel:
+  get:
+    tags:
+      - channels
+    operationId: getChannel
+    summary: 获取单个渠道
+    description: |
+      读取渠道配置详情。
+
+      **权限**：`channel:manage`（渠道目标与错误信息属敏感信息）。
+
+      **脱敏**：只返回 `target_masked` 与 `secret_set`，不返回 `target`/`secret`。
+      管理员如需核对完整目标，只能通过审计日志（`audit:read`）查看变更历史。
+
+      **缓存**：响应带强 `ETag`（等于 `revision`）；`If-None-Match` 命中返回 `304`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: channel_id
+        in: path
+        required: true
+        description: 渠道 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 渠道详情（已脱敏）。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Cache-Control:
+            description: 管理端点，禁止共享缓存。
+            schema:
+              type: string
+            example: private, no-store
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/Channel
+            example:
+              id: chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              name: 2024 级训练群
+              kind: qq_group
+              target_masked: '****1234'
+              secret_set: true
+              enabled: true
+              template: null
+              mention_all: false
+              rate_limit_per_minute: 30
+              visibility_filter: all
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              last_delivery_at: '2024-05-06T07:08:10.000Z'
+              last_error: null
+              created_at: '2024-05-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:00:00.000Z'
+              revision: '2'
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+  patch:
+    tags:
+      - channels
+    operationId: updateChannel
+    summary: 局部更新渠道
+    description: |
+      修改渠道名、目标、密钥、启用状态、模板与限速。
+
+      **权限**：`channel:manage`。
+
+      **敏感字段**：`target`/`secret` 提供时**整体替换**旧值；`secret: null` 表示
+      清除密钥（`secret_set` 变 `false`）。响应仍然只回显 `target_masked` 与
+      `secret_set`。
+
+      **时序**：修改立即对**后续**投递生效；已经在重试队列中的投递沿用发起时的
+      目标快照，不会中途改投。禁用渠道（`enabled=false`）不会取消已排队的投递，
+      这些投递会以 `skipped` 结束。
+
+      **并发控制**：`If-Match` 不匹配返回 `412 precondition_failed`；
+      `name` 与其它渠道冲突返回 `409 conflict`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: channel_id
+        in: path
+        required: true
+        description: 渠道 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/news.yaml#/components/schemas/UpdateChannelRequest
+          example:
+            enabled: false
+            rate_limit_per_minute: 10
+            visibility_filter: all
+    responses:
+      '200':
+        description: 更新后的渠道（已脱敏）；`revision` 已提升。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/Channel
+            example:
+              id: chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              name: 2024 级训练群
+              kind: qq_group
+              target_masked: '****1234'
+              secret_set: false
+              enabled: false
+              template: null
+              mention_all: false
+              rate_limit_per_minute: 10
+              visibility_filter: all
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              last_delivery_at: '2024-05-06T07:08:10.000Z'
+              last_error: null
+              created_at: '2024-05-01T02:00:00.000Z'
+              updated_at: '2024-05-06T08:00:00.000Z'
+              revision: '3'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+  delete:
+    tags:
+      - channels
+    operationId: deleteChannel
+    summary: 删除广播渠道
+    description: |
+      删除渠道。**不可撤销**；如需临时停用请改用 `PATCH` 设置 `enabled=false`。
+
+      **权限**：`channel:manage`。
+
+      **副作用**：历史投递记录（`Delivery`）**保留**——其中的 `channel` 是发起投递
+      时的快照（`id`/`name`/`kind`），因此投递审计不会因为删除渠道而丢失；
+      该渠道上尚未投递的排队任务会以 `skipped` 结束。
+
+      **幂等**：重复删除总是返回 `204`；`404` 仅在 id 从未存在时返回。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: channel_id
+        in: path
+        required: true
+        description: 渠道 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    responses:
+      '204':
+        $ref: ../components/responses/common.yaml#/components/responses/NoContent
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+channelTest:
+  post:
+    tags:
+      - channels
+    operationId: testChannel
+    summary: 测试渠道连通性
+    description: |
+      向该渠道真实投递一条测试消息，用于验证目标地址、密钥与模板是否可用。
+
+      **权限**：`channel:manage`。
+
+      **失败不是 HTTP 错误**：只要请求本身合法，无论上游是否接收成功都返回 `200`，
+      由 `ok`（是否被上游接受）、`status_code`、`latency_ms` 与 `error` 表达结果；
+      只有认证、权限、参数问题才返回 4xx。渠道 `enabled=false` 时也可测试，
+      以便在启用前验证配置。
+
+      **非幂等**：每次调用都会产生一次真实投递，客户端**不得自动重试**；
+      为满足契约统一的写操作约定仍要求携带 `Idempotency-Key`——同一 key 的网络重放
+      直接返回首次结果而不再投递，但使用新 key 再次调用一定会再次发送。
+
+      **限流**：同一渠道的测试请求会被限流，触发时返回 `429`（不影响正式广播队列）。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: channel_id
+        in: path
+        required: true
+        description: 渠道 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/news.yaml#/components/schemas/TestChannelRequest
+          example:
+            message: 面板渠道测试，请忽略。
+    responses:
+      '200':
+        description: 测试结果；投递失败以 `ok=false` 与 `error` 表达。
+        headers:
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/ChannelTestResult
+            example:
+              ok: true
+              latency_ms: 182
+              status_code: 200
+              error: null
+              sent_at: '2024-05-06T07:08:09.123Z'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong

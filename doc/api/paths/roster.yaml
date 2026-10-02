@@ -1,0 +1,447 @@
+rosterExports:
+  get:
+    tags:
+      - roster
+    operationId: listRosterExports
+    summary: 列出成员名单导出任务
+    description: |
+      **权限**：需要 `member:read`；缺少该 scope 返回 `403 insufficient_scope`。
+
+      **语义**：偏移分页返回导出记录，按 `created_at` 倒序。**可见范围**：
+      默认只返回调用者自己创建的记录；持有 `member:manage` 的主体可看到全部记录
+      （用于运维排查"谁导出了成员名单"）。`status` 可按状态过滤，便于轮询未完成任务。
+
+      **时序**：任务状态强一致——返回的 `status`、`row_count`、`download_url` 都是
+      服务端当前的已提交状态，不使用滞后快照。轮询建议使用 `status=queued` /
+      `status=running` 缩小结果集。
+
+      **副作用**：无，只读。**幂等**：是。
+
+      **错误分支**：未知 `status` 值 → `400 bad_request`；越界 `page` 返回空 `items`
+      而非 `404`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: status
+        in: query
+        required: false
+        description: |
+          导出状态过滤：`queued`、`running`、`succeeded`、`failed`、`expired`。
+        schema:
+          type: string
+          enum:
+            - queued
+            - running
+            - succeeded
+            - failed
+            - expired
+        example: succeeded
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Page
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Size
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Order
+    responses:
+      '200':
+        description: 导出记录的分页结果。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/roster.yaml#/components/schemas/PagedRosterExport
+            example:
+              page: 1
+              size: 20
+              total: 2
+              has_next: false
+              items:
+                - id: exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  status: succeeded
+                  format: csv
+                  include_inactive: false
+                  active_within: P365D
+                  row_count: 87
+                  excluded_inactive_count: 12
+                  size_bytes: 20480
+                  download_url: /api/v1/roster/exports/exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0/download?download_token=xcd_7f3aQ0K3M7N9P2R4T6W8X0
+                  download_expires_at: '2024-05-06T07:23:09.123Z'
+                  created_by:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  created_at: '2024-05-06T07:08:09.123Z'
+                  completed_at: '2024-05-06T07:08:11.000Z'
+                  error: null
+                  filters:
+                    labels:
+                      - member
+                  columns:
+                    - username
+                    - display_name
+                    - student_id
+                    - enrollment_year
+                    - major
+                    - email
+                - id: exp_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+                  status: running
+                  format: csv
+                  include_inactive: false
+                  active_within: P365D
+                  row_count: null
+                  excluded_inactive_count: null
+                  size_bytes: null
+                  download_url: null
+                  download_expires_at: null
+                  created_at: '2024-05-06T07:12:00.000Z'
+                  completed_at: null
+                  error: null
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+  post:
+    tags:
+      - roster
+    operationId: createRosterExport
+    summary: 发起成员名单导出
+    description: |
+      **权限**：需要 `member:manage`，而不是 `member:read`。成员名单导出包含学号、
+      电话、QQ 等 PII，因此导出权限与成员名单读写权限分离；缺少该 scope 返回
+      `403 insufficient_scope`。
+
+      **默认过滤**：`include_inactive` 默认 `false` 且 `active_within`
+      默认 `P365D`，即**只导出最近 1 年内活跃过的成员**，等价于
+      **超过 1 年未活跃的成员被自动排除**——"活跃"指
+      `max(last_login_at, last_api_use_at, last_oj_activity_at)` 落在窗口内，
+      从未活跃者一律排除。被自动排除的人数可在产物
+      `RosterExport.excluded_inactive_count` 上观测，避免静默丢人；需要全量成员名单时
+      显式传 `include_inactive=true`。
+
+      **语义**：本接口只创建异步任务，立即返回 `202 Accepted`、
+      `Location: /jobs/{job_id}` 与 `Retry-After`；响应体是 `Job`，kind 为 `roster_export`。
+      客户端按 `Retry-After` 轮询 `GET /jobs/{job_id}`，任务成功后
+      `result.export_id` 指向可用 `GET /roster/exports/{export_id}` 读取的
+      `RosterExport`。产物保留期有限，过期后 `status=expired`，下载返回 `410`。
+
+      **dry_run**：可带 `?dry_run=true`，这是共享查询参数。此时只做筛选与计数，
+      **不生成文件**、不占用保留期配额，任务立即进入终态 `succeeded`，
+      `result` 只含 `{row_count, excluded_inactive_count}` 统计，不含 `export_id`；
+      响应形状与真实执行保持一致，但其中的任务 id 为合成值，`GET /jobs/{job_id}`
+      不保证可读。
+
+      **幂等**：必须携带 `Idempotency-Key`；同一键在保留期内重放返回**首次**的
+      `202` 与同一个 `job_id`，并带 `Idempotency-Replayed: true`，不会排队第二个任务；
+      请求体不同则返回 `409 idempotency_key_reused`。
+
+      **副作用**：写审计记录，含发起者、筛选条件与被排除人数，产出文件存储到产物区。
+      **时序**：任务记录本身强一致（返回后立即可查 `GET /jobs/{job_id}`），
+      但产物生成是异步的。
+
+      **错误分支**：筛选条件非法，例如未知列名、非法时长或年份、未知 `format`→
+      `422 validation_failed`；命中行数超过服务端 `export_row_limit`（见
+      `Config.roster.export_row_limit`，默认 10 000 行）→ `413 payload_too_large`，
+      请缩小筛选范围或分批导出；
+      产物队列不可用 → `503 service_unavailable`，按 `Retry-After` 重试。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+      - $ref: ../components/parameters/common.yaml#/components/parameters/DryRun
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/roster.yaml#/components/schemas/RosterExportRequest
+          example:
+            format: csv
+            include_inactive: false
+            active_within: P365D
+            columns:
+              - username
+              - display_name
+              - student_id
+              - enrollment_year
+              - major
+              - email
+            filters:
+              labels:
+                - member
+              enrollment_years:
+                - 2022
+                - 2023
+            include_oj_handles: true
+            include_activity: true
+    responses:
+      '202':
+        description: 导出任务已接受；按 `Retry-After` 轮询 `Location` 指向的任务。
+        headers:
+          Location:
+            $ref: ../components/headers/common.yaml#/components/headers/Location
+          Retry-After:
+            $ref: ../components/headers/common.yaml#/components/headers/RetryAfter
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/components/schemas/Job
+            example:
+              id: job_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              kind: roster_export
+              state: queued
+              progress:
+                percent: 0
+                message: 已入队，等待导出
+              result: null
+              error: null
+              created_at: '2024-05-06T07:08:09.123Z'
+              started_at: null
+              finished_at: null
+              expires_at: '2024-05-07T07:08:09.123Z'
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '413':
+        $ref: ../components/responses/common.yaml#/components/responses/PayloadTooLarge
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+      '503':
+        $ref: ../components/responses/common.yaml#/components/responses/ServiceUnavailable
+    x-idempotent: true
+    x-consistency: strong
+
+rosterExport:
+  get:
+    tags:
+      - roster
+    operationId: getRosterExport
+    summary: 获取成员名单导出详情
+    description: |
+      **权限**：需要 `member:read`；**且**该导出由调用者创建，或调用者持有
+      `member:manage`，可见全部。两者都不满足时返回 `404 not_found`（不区分
+      "不存在"与"无权"，避免泄露他人的导出 id）。
+
+      **语义**：返回导出记录，用于轮询状态、读取计数（`row_count`、
+      `excluded_inactive_count`、`size_bytes`）与获取新的 `download_url`。
+      `status=expired` 表示产物已被保留策略清理：元数据仍可读，但
+      `download_url` 为 `null`，下载接口返回 `410 export_expired`，需要重新发起导出。
+
+      **下载链接**：`download_url` 是短时有效的相对 URI，默认 15 分钟，截止时刻见
+      `download_expires_at`。链接过期后重新调用本接口即可拿到新链接；
+      若产物已被清理，status 为 `expired`则只能重新 `POST /roster/exports`。
+
+      **缓存与并发**：返回 `ETag`（由 `status`、计数与 `completed_at` 等可观察字段
+      派生，与 `revision` 无关——导出记录没有乐观并发写入）；`If-None-Match` 命中
+      返回 `304`，适用于长时间轮询时节省带宽。
+
+      **时序**：强一致，状态机为 `queued → running → (succeeded | failed)`，
+      产物清理后 `succeeded → expired`；非法迁移，例如 `expired → running`
+      不会发生，客户端不应据此重试。
+
+      **副作用**：无，只读。**幂等**：是。
+
+      **错误分支**：导出记录不存在或不可见 → `404 not_found`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: export_id
+        in: path
+        required: true
+        description: 导出记录 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 导出记录。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/roster.yaml#/components/schemas/RosterExport
+            example:
+              id: exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              status: succeeded
+              format: csv
+              include_inactive: false
+              active_within: P365D
+              row_count: 87
+              excluded_inactive_count: 12
+              size_bytes: 20480
+              download_url: /api/v1/roster/exports/exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0/download?download_token=xcd_7f3aQ0K3M7N9P2R4T6W8X0
+              download_expires_at: '2024-05-06T07:23:09.123Z'
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              created_at: '2024-05-06T07:08:09.123Z'
+              completed_at: '2024-05-06T07:08:11.000Z'
+              error: null
+              filters:
+                labels:
+                  - member
+                enrollment_years:
+                  - 2022
+                  - 2023
+              columns:
+                - username
+                - display_name
+                - student_id
+                - enrollment_year
+                - major
+                - email
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+rosterExportDownload:
+  get:
+    tags:
+      - roster
+    operationId: downloadRosterExport
+    summary: 下载成员名单导出产物
+    description: |
+      **权限**：需要 `member:read`；**且**该导出由调用者创建，或调用者持有
+      `member:manage`。两者都不满足时返回 `404 not_found`。
+
+      **语义**：以 `200` 返回产物本体。`Content-Type` 取决于导出的 `format`：
+      `csv` 为 `text/csv; charset=utf-8`，并带 UTF-8 表头行，`json` 为
+      `application/json` 为对象数组，字段由 `columns` 决定；两者都带
+      `Content-Disposition: attachment` 与 `Content-Length`，可直接交给浏览器保存。
+
+      **链接有效期**：`download_url` 是短时有效的相对 URI，默认 15 分钟，
+      截止时刻见 `RosterExport.download_expires_at`，其中的 `download_token`
+      是只对该产物有效的短时令牌；也可以用常规凭证 `Authorization` 或 `X-API-Key`
+      直接请求本接口而省略 `download_token`。**链接过期后**：返回 `403 forbidden`，detail 会说明链接已过期。客户端应重新 `GET /roster/exports/{export_id}`
+      获取新的 `download_url`，或重新发起导出。需要长期保存时请在链接有效期内
+      落盘，不要缓存 URL。
+
+      **产物已清理**：若导出 `status=expired`，即产物超过保留期已被清理，返回
+      `410 Gone`，body 为 Problem 且 `code=export_expired`；此时只能重新发起导出。
+
+      **副作用**：无，只读且不消耗产物。**幂等**：是——在产物保留期内重复下载
+      返回相同字节。
+
+      **错误分支**：`{export_id}` 不存在或不可见 → `404 not_found`；导出尚未成功
+      → `409 conflict`，detail 说明产物的 `status`；
+      `status=failed` → `409 conflict`，含 `error` 摘要。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: export_id
+        in: path
+        required: true
+        description: 导出记录 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: download_token
+        in: query
+        required: false
+        description: |
+          `download_url` 中附带的短时下载令牌，默认 15 分钟有效，见
+          `RosterExport.download_expires_at`；只对该 `export_id` 的产物有效。
+          省略时必须携带常规凭证（`Authorization`/`X-API-Key` + `member:read`）。
+          令牌过期返回 `403 forbidden`，请重新获取 `download_url`。
+        schema:
+          type: string
+          minLength: 16
+          maxLength: 512
+        example: xcd_7f3aQ0K3M7N9P2R4T6W8X0
+    responses:
+      '200':
+        description: 导出产物（CSV 文本或 JSON 数组）。
+        headers:
+          Content-Disposition:
+            description: 附件下载提示，形如 `attachment; filename="roster-2024-05-06.csv"`。
+            schema:
+              type: string
+            example: attachment; filename="roster-2024-05-06.csv"
+          Content-Length:
+            description: 产物字节数，与 `RosterExport.size_bytes` 一致。
+            schema:
+              type: integer
+              minimum: 0
+            example: 20480
+        content:
+          text/csv:
+            schema:
+              type: string
+              description: UTF-8 编码的 CSV 文本（首行为列头，`columns` 决定列顺序）。
+            example: |
+              username,display_name,student_id,enrollment_year,major,email
+              alice,张三,2220210000,2022,计算机科学与技术,alice@example.edu.cn
+          application/json:
+            schema:
+              type: array
+              description: 对象数组；字段名由 `columns` 决定。`format=json` 的导出返回此表示。
+              items:
+                type: object
+                additionalProperties: true
+            example:
+              - username: alice
+                display_name: 张三
+                student_id: '2220210000'
+                enrollment_year: 2022
+                major: 计算机科学与技术
+                email: alice@example.edu.cn
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '410':
+        $ref: ../components/responses/common.yaml#/components/responses/ExportExpired
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+      '503':
+        $ref: ../components/responses/common.yaml#/components/responses/ServiceUnavailable
+    x-idempotent: true
+    x-consistency: strong

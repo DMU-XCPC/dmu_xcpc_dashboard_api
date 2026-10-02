@@ -1,0 +1,389 @@
+config:
+  get:
+    tags:
+      - config
+    operationId: getConfig
+    summary: 获取当前生效配置
+    description: |
+      需要 `config:read`。返回**当前生效**的完整配置快照。
+
+      **来源**：配置来自 TOML/YAML 配置文件，可被环境变量覆盖，也可由
+      `PATCH /config` 在运行时修改（优先级：环境变量覆盖 > 接口修改 > 文件）。
+      本服务**只支持 TOML/YAML 配置文件，绝不支持 XML**；本接口只收发 JSON。
+
+      **敏感项**：webhook secret、数据库口令、签名密钥等**永不返回明文**，
+      在 `GET /config/schema` 中标记 `secret: true`，值只以 `<字段名>_set`
+      布尔字段反映"是否已设置"。
+
+      **`restart_required_fields`**：列出当前期望值与正在运行的进程不一致、
+      需要重启才生效的字段（JSON Pointer 列表）；空数组表示全部已生效。
+      它让客户端无需新错误码即可表达"部分生效"。
+
+      **缓存**：带强 `ETag`；`If-None-Match` 命中返回 `304`，
+      客户端应继续使用本地快照。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 当前生效配置。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/config.yaml#/components/schemas/Config
+            example:
+              revision: '42'
+              source: api
+              updated_at: '2024-05-06T07:08:09.123Z'
+              server:
+                public_read: true
+                base_url: https://dashboard.dmu.edu.cn
+                cors_origins:
+                  - https://dashboard.dmu.edu.cn
+              auth:
+                access_token_ttl: PT30M
+                refresh_token_ttl: P30D
+                password_min_length: 12
+                session_max_per_principal: 10
+              accounts:
+                default_template: user
+                templates:
+                  user:
+                    description: 普通成员；可自助维护自己的档案与社团登记。
+                    scopes:
+                    - account:self
+                    - profile:display
+                    - profile:contact
+                    - profile:academic
+                    - profile:clubs
+                    - member:read
+                    - team:read
+                    - oj:read
+                    - oj:write
+                    - quota:claim
+                  manager:
+                    description: 管理员；在 user 基础上可读 PII、管人与管名额。
+                    scopes:
+                    - account:self
+                    - profile:display
+                    - profile:contact
+                    - profile:academic
+                    - profile:clubs
+                    - member:read
+                    - team:read
+                    - oj:read
+                    - oj:write
+                    - quota:claim
+                    - member:read_pii
+                    - member:manage
+                    - member:assign
+                    - team:manage
+                    - oj:manage
+                    - quota:read
+                    - quota:manage
+                    - scoreboard:read
+                    - scoreboard:manage
+                    - stats:read
+                    - sync:read
+                    - audit:read
+                    - announcement:read
+                    - announcement:write
+                    - announcement:publish
+              ingest:
+                batch_max: 500
+                clock_skew_past: P1095D
+                clock_skew_future: P1D
+                submissions_retention: P2Y
+              roster:
+                active_within: P365D
+                export_ttl: PT15M
+                export_row_limit: 10000
+              scoreboards:
+                refresh_interval: PT15M
+                freshness_bound: PT15M
+                max_entries: 5000
+              stats:
+                materialize_interval: PT1H
+                freshness_bound: PT1H
+                max_range_days: 730
+              announcements:
+                max_pinned: 3
+                dedup_window: P7D
+                broadcast_retry:
+                  max_attempts: 5
+                  backoff: PT30S
+              stream:
+                heartbeat_interval: PT15S
+                replay_buffer_events: 10000
+                replay_buffer_duration: PT1H
+                stream_token_ttl: PT10M
+              rate_limit:
+                default_per_minute: 600
+                ingest_per_minute: 3000
+                export_per_hour: 20
+              judges:
+                enabled:
+                  - codeforces
+                  - atcoder
+                crawl_interval: PT30M
+              log:
+                level: info
+                format: json
+              restart_required_fields: []
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+  patch:
+    tags:
+      - config
+    operationId: patchConfig
+    summary: 运行时修改配置
+    description: |
+      需要 `config:manage`。段落级合并、**叶子级**应用变更；字段写 `null`
+      表示恢复该字段的配置文件默认值。
+
+      **全量校验、全量应用或全部拒绝**：服务端先对合并后的完整配置做一次性校验，
+      任一字段非法则整体拒绝 `422 validation_failed`，
+      `errors[].pointer` 指向具体配置路径，例如 `/ingest/batch_max`，
+      **不产生任何部分生效**。跨字段一致性也在同一次校验中完成。
+
+      **生效时机**：变更对后续请求立即生效；被标记为需要重启的字段会出现在响应
+      `restart_required_fields` 中，要等进程重启后才作用于运行时。
+      被环境变量覆盖（`source: override`）的字段不可修改，返回 `409 conflict`。
+
+      **并发**：建议带 `If-Match`（取 `GET /config` 的 `ETag`）；不匹配返回
+      `412 precondition_failed`，不做任何修改。
+      **幂等**：`Idempotency-Key` 必填；同一键重放返回首次结果。
+      **审计**：本接口**会写审计日志**（`action: config.patch`，`metadata`
+      记录变更的 JSON Pointer 列表，不含敏感值）。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/config.yaml#/components/schemas/ConfigPatch
+          example:
+            ingest:
+              batch_max: 800
+            log:
+              level: debug
+    responses:
+      '200':
+        description: 应用后的完整配置，含新的 `revision` 与 `restart_required_fields`。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/config.yaml#/components/schemas/Config
+            example:
+              revision: '43'
+              source: api
+              updated_at: '2024-05-06T07:30:00.000Z'
+              server:
+                public_read: true
+                base_url: https://dashboard.dmu.edu.cn
+                cors_origins:
+                  - https://dashboard.dmu.edu.cn
+              auth:
+                access_token_ttl: PT30M
+                refresh_token_ttl: P30D
+                password_min_length: 12
+                session_max_per_principal: 10
+              accounts:
+                default_template: user
+                templates:
+                  user:
+                    description: 普通成员；可自助维护自己的档案与社团登记。
+                    scopes:
+                    - account:self
+                    - profile:display
+                    - profile:contact
+                    - profile:academic
+                    - profile:clubs
+                    - member:read
+                    - team:read
+                    - oj:read
+                    - oj:write
+                    - quota:claim
+                  manager:
+                    description: 管理员；在 user 基础上可读 PII、管人与管名额。
+                    scopes:
+                    - account:self
+                    - profile:display
+                    - profile:contact
+                    - profile:academic
+                    - profile:clubs
+                    - member:read
+                    - team:read
+                    - oj:read
+                    - oj:write
+                    - quota:claim
+                    - member:read_pii
+                    - member:manage
+                    - member:assign
+                    - team:manage
+                    - oj:manage
+                    - quota:read
+                    - quota:manage
+                    - scoreboard:read
+                    - scoreboard:manage
+                    - stats:read
+                    - sync:read
+                    - audit:read
+                    - announcement:read
+                    - announcement:write
+                    - announcement:publish
+              ingest:
+                batch_max: 800
+                clock_skew_past: P1095D
+                clock_skew_future: P1D
+                submissions_retention: P2Y
+              roster:
+                active_within: P365D
+                export_ttl: PT15M
+                export_row_limit: 10000
+              scoreboards:
+                refresh_interval: PT15M
+                freshness_bound: PT15M
+                max_entries: 5000
+              stats:
+                materialize_interval: PT1H
+                freshness_bound: PT1H
+                max_range_days: 730
+              announcements:
+                max_pinned: 3
+                dedup_window: P7D
+                broadcast_retry:
+                  max_attempts: 5
+                  backoff: PT30S
+              stream:
+                heartbeat_interval: PT15S
+                replay_buffer_events: 10000
+                replay_buffer_duration: PT1H
+                stream_token_ttl: PT10M
+              rate_limit:
+                default_per_minute: 600
+                ingest_per_minute: 3000
+                export_per_hour: 20
+              judges:
+                enabled:
+                  - codeforces
+                  - atcoder
+                crawl_interval: PT30M
+              log:
+                level: debug
+                format: json
+              restart_required_fields:
+                - /log/level
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+configSchema:
+  get:
+    tags:
+      - config
+    operationId: getConfigSchema
+    summary: 获取配置字段元数据
+    description: |
+      需要 `config:read`。返回与 `Config` 同版本的机器可读元数据，客户端可据此：
+
+      - 自动渲染配置表单（`type`/`enum`/`min`/`max`/`default`）；
+      - **隐藏 `secret=true` 的字段**，只显示"是否已设置"（值永不下发）；
+      - 把 `mutable=false` 的字段设为只读；
+      - 提前提示哪些字段改动后需要重启（`restart_required`）。
+
+      本接口只描述 TOML/YAML 配置项，**与 XML 无关**（本服务不支持 XML）。
+
+      **缓存**：带强 `ETag`；`If-None-Match` 命中返回 `304`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 配置元数据。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/config.yaml#/components/schemas/ConfigSchema
+            example:
+              revision: '42'
+              sections:
+                - key: ingest
+                  title: 采集通道
+                  description: 采集器写入通道的限制与保留期。
+                  fields:
+                    - path: /ingest/batch_max
+                      type: integer
+                      default: 500
+                      min: 1
+                      max: 10000
+                      secret: false
+                      mutable: true
+                      restart_required: false
+                      description: 单个 ingest 批次允许的最大条目数。
+                    - path: /ingest/submissions_retention
+                      type: duration
+                      default: P2Y
+                      secret: false
+                      mutable: true
+                      restart_required: false
+                      description: 提交记录保留期。
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true

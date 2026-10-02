@@ -1,0 +1,445 @@
+ingestSubmissions:
+  post:
+    tags:
+      - ingest
+    operationId: ingestOjSubmissions
+    summary: 批量上报 OJ 提交记录
+    description: |
+      采集器 crawler 向主服务器上报 OJ 提交记录的**唯一写入口**，服务于
+      "采集器完全独立、只走 API" 的部署形态，即 `CrawlerConfig.mode = external`；
+      与服务器共用数据库的采集器不需要调用本端点。
+
+      **权限**：需要 `ingest:write`，使用机器人或采集器凭证。缺少凭证 `401 unauthenticated`，
+      已认证但 scope 不足 `403 insufficient_scope`。
+
+      **幂等由自然键保证**：自然键指业务上能唯一确定一条记录的字段组合，这里就是
+      `(judge, submission_id)`——同一平台同一次提交无论上报多少次都只算一条。
+      重复上报——无论是否更换 `Idempotency-Key`——都记为 `duplicate`，
+      **不是错误**，也不会覆盖已存记录。相同 `Idempotency-Key` + 相同请求体重放时，
+      服务端返回**首次**的 `200 IngestResult` 并带 `Idempotency-Replayed: true`；
+      同一个键配不同请求体则 `409 idempotency_key_reused`。
+
+      **部分成功**：`200` 响应体里的 `items[].status` 逐条给出
+      `accepted` / `duplicate` / `rejected`。单条校验失败，例如 `submitted_at` 超出容忍区间
+      `now-3y .. now+1d`、`judge` 未在 `GET /meta` 的 `capabilities.judges` 内、
+      必填字段缺失等）只把该条记为 `rejected` 并用 `items[].code` / `message` /
+      `pointer` 说明原因，**其余条目照常写入**。只要批次本身被接受就返回 `200`，
+      客户端必须检查 `rejected` 决定是否重试。
+
+      **整批拒绝**：条目数超过 `capabilities.ingest_batch_max`，默认 500返回
+      `413 payload_too_large`，**整批不入库、无任何副作用**；请求体不是合法 JSON 或
+      媒体类型不对返回 `400` / `415`；语义错误无法定位到单条时，例如 `items` 为空数组
+      返回 `422 validation_failed`。限流返回 `429`，并带 `Retry-After`，
+      服务端维护或依赖不可用返回 `503`。
+
+      **乱序接受**：`submitted_at` 允许早于服务器已存记录，服务端按自然键 upsert，
+      不要求提交顺序，因此补抓历史数据是安全的。
+
+      **时序**：写入对后续 ingest 立即可见，但统计、榜单与 `/oj/*` 公开查询是
+      **最终一致**的；`IngestResult.materialized_at` 是这批数据在聚合视图里可见的时刻，
+      也就是"物化"完成、可被榜单与统计读到的时间点
+      ，新鲜度上界见 `x-freshness-bound`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/oj_data.yaml#/components/schemas/IngestSubmissionsRequest
+          example:
+            crawler_run_id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            items:
+              - judge: codeforces
+                submission_id: '223456789'
+                handle: tourist
+                problem:
+                  judge: codeforces
+                  external_id: 1873A
+                  title: Short Sort
+                verdict: accepted
+                verdict_raw: OK
+                language: GNU C++17
+                submitted_at: '2024-05-06T06:59:12.000Z'
+                contest_id: '1873'
+                contest_name: Codeforces Round 898 (Div. 4)
+                is_first_ac: true
+              - judge: codeforces
+                submission_id: '223456790'
+                handle: tourist
+                problem:
+                  judge: codeforces
+                  external_id: 1873B
+                verdict: wrong_answer
+                verdict_raw: WRONG_ANSWER
+                language: GNU C++17
+                submitted_at: '2024-05-06T07:00:03.000Z'
+                contest_id: '1873'
+    responses:
+      '200':
+        description: |
+          批次已处理。`items` 与请求条目一一对应，可能是部分成功；
+          重复条目计入 `duplicates` 而不是错误。
+        headers:
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/IngestResult
+            example:
+              accepted: 1
+              duplicates: 0
+              rejected: 1
+              crawler_run_id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              materialized_at: '2024-05-06T07:15:00.000Z'
+              items:
+                - index: 0
+                  status: accepted
+                  id: sub_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  code: null
+                  message: null
+                  pointer: null
+                - index: 1
+                  status: rejected
+                  id: null
+                  code: judge_not_supported
+                  message: judge 未在 capabilities.judges 内启用
+                  pointer: /items/1/judge
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '413':
+        $ref: ../components/responses/common.yaml#/components/responses/PayloadTooLarge
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+      '503':
+        $ref: ../components/responses/common.yaml#/components/responses/ServiceUnavailable
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT5M
+
+ingestRatings:
+  post:
+    tags:
+      - ingest
+    operationId: ingestOjRatings
+    summary: 批量上报 OJ rating 记录
+    description: |
+      采集器上报 **rating 观测记录**的写入口（`CrawlerConfig.mode = external` 的
+      独立采集器使用；共用数据库的采集器不需要调用）。**只要求"某时刻的 rating"**：
+      `delta` 不是上报字段，由服务端按同一账号的相邻记录派生。
+
+      **权限**：需要 `ingest:write`。缺少凭证 `401 unauthenticated`，
+      已认证但 scope 不足 `403 insufficient_scope`。
+
+      **幂等由自然键保证**：每条记录以 `(judge, handle, contest_id)` 为自然键；
+      未提供 `contest_id`，例如周期性 rating 快照时退化为 `(judge, handle, at)`。
+      重复上报——无论是否更换 `Idempotency-Key`——都记为 `duplicate`，**不是错误**，
+      也不会覆盖已存记录。相同 `Idempotency-Key` + 相同请求体重放时返回**首次**的
+      `200 IngestResult` 并带 `Idempotency-Replayed: true`；同键不同体返回
+      `409 idempotency_key_reused`。
+
+      **部分成功**：`200` 响应体里的 `items[].status` 逐条给出
+      `accepted` / `duplicate` / `rejected`。单条校验失败（`at` 超出容忍区间
+      `now-3y .. now+1d`、`judge` 未启用、必填字段缺失等）只把该条记为 `rejected`，
+      其余照常写入。批次本身被接受即返回 `200`，客户端须检查 `rejected`。
+
+      **整批拒绝**：条目数超过 `capabilities.ingest_batch_max`，默认 500返回
+      `413 payload_too_large`，**整批不入库、无副作用**；请求体非法返回 `400`；
+      `items` 为空等无法定位到单条的语义错误返回 `422 validation_failed`；
+      限流 `429`；服务端不可用 `503`。
+
+      **乱序接受**：`at` 允许早于服务器已存记录，按自然键 upsert，不要求顺序。
+
+      **时序**：写入后统计与榜单为**最终一致**，`IngestResult.materialized_at`
+      给出聚合可见时刻，新鲜度上界见 `x-freshness-bound`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/oj_data.yaml#/components/schemas/IngestRatingRecordsRequest
+          example:
+            crawler_run_id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            items:
+              - judge: codeforces
+                handle: tourist
+                contest_id: '1873'
+                contest_name: Codeforces Round 898 (Div. 4)
+                rating: 3721
+                max_rating: 3800
+                rank: 7
+                performance: 3810
+                at: '2023-09-21T16:35:00.000Z'
+              - judge: atcoder
+                handle: tourist
+                rating: 2843
+                at: '2024-05-01T00:00:00.000Z'
+    responses:
+      '200':
+        description: |
+          批次已处理。`items` 与请求条目一一对应，可能是部分成功；
+          重复条目计入 `duplicates` 而不是错误。
+        headers:
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/IngestResult
+            example:
+              accepted: 1
+              duplicates: 0
+              rejected: 0
+              crawler_run_id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              materialized_at: '2024-05-06T07:15:00.000Z'
+              items:
+                - index: 0
+                  status: accepted
+                  id: rch_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  code: null
+                  message: null
+                  pointer: null
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '413':
+        $ref: ../components/responses/common.yaml#/components/responses/PayloadTooLarge
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+      '503':
+        $ref: ../components/responses/common.yaml#/components/responses/ServiceUnavailable
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT5M
+
+ingestHandleSnapshots:
+  post:
+    tags:
+      - ingest
+    operationId: ingestOjHandleSnapshots
+    summary: 批量上报 OJ 账号指标快照
+    description: |
+      采集器上报账号指标快照（rating / 解题数等时序采样）的写入口，
+      用于绘制历史曲线（`CrawlerConfig.mode = external` 的独立采集器使用）。
+
+      **权限**：需要 `ingest:write`。缺少凭证 `401 unauthenticated`，
+      已认证但 scope 不足 `403 insufficient_scope`。
+
+      **幂等由自然键保证**：每条快照以 `(judge, handle, captured_at)` 为自然键。
+      重复上报——无论是否更换 `Idempotency-Key`——都记为 `duplicate`，**不是错误**，
+      也不会覆盖已存记录。相同 `Idempotency-Key` + 相同请求体重放时返回**首次**的
+      `200 IngestResult` 并带 `Idempotency-Replayed: true`；同键不同体返回
+      `409 idempotency_key_reused`。
+
+      **部分成功**：`200` 响应体里的 `items[].status` 逐条给出
+      `accepted` / `duplicate` / `rejected`。单条校验失败（`captured_at` 超出容忍区间
+      `now-3y .. now+1d`、`judge` 未启用、必填字段缺失等）只把该条记为 `rejected`，
+      其余照常写入。批次被接受即返回 `200`。
+
+      **整批拒绝**：条目数超过 `capabilities.ingest_batch_max`，默认 500返回
+      `413 payload_too_large`，**整批不入库、无副作用**；请求体非法返回 `400`；
+      语义错误无法定位到单条时返回 `422 validation_failed`；限流 `429`；
+      服务端不可用 `503`。
+
+      **乱序接受**：`captured_at` 允许早于服务器已存记录，按自然键 upsert，不要求顺序。
+
+      **时序**：快照本身写入后即可被读取，但基于快照的统计与图表为**最终一致**，
+      `IngestResult.materialized_at` 给出聚合可见时刻，新鲜度上界见 `x-freshness-bound`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/oj_data.yaml#/components/schemas/IngestHandleSnapshotsRequest
+          example:
+            crawler_run_id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            items:
+              - judge: codeforces
+                handle: tourist
+                captured_at: '2024-05-06T00:00:00.000Z'
+                rating: 3721
+                max_rating: 3800
+                solved_count: 1873
+                attempted_count: 2104
+                submissions_30d: 96
+                active_days_30d: 21
+    responses:
+      '200':
+        description: |
+          批次已处理。`items` 与请求条目一一对应，可能是部分成功；
+          重复条目计入 `duplicates` 而不是错误。
+        headers:
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/IngestResult
+            example:
+              accepted: 0
+              duplicates: 1
+              rejected: 0
+              crawler_run_id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              materialized_at: '2024-05-06T07:15:00.000Z'
+              items:
+                - index: 0
+                  status: duplicate
+                  id: snp_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  code: null
+                  message: null
+                  pointer: null
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '413':
+        $ref: ../components/responses/common.yaml#/components/responses/PayloadTooLarge
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+      '503':
+        $ref: ../components/responses/common.yaml#/components/responses/ServiceUnavailable
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT5M
+
+ingestProblems:
+  post:
+    tags:
+      - ingest
+    operationId: ingestOjProblems
+    summary: 批量上报 OJ 题目元数据
+    description: |
+      采集器上报题目元数据的写入口。提交记录里若引用了尚未入库的题目，
+      服务端会先建立占位题目，之后可用本端点补全标题、标签与难度。
+
+      **权限**：需要 `ingest:write`。缺少凭证 `401 unauthenticated`，
+      已认证但 scope 不足 `403 insufficient_scope`。
+
+      **幂等由自然键保证**：每题以 `(judge, external_id)` 为自然键。
+      重复上报——无论是否更换 `Idempotency-Key`——都记为 `duplicate`，**不是错误**；
+      已存在的题目只用非空字段补全缺失信息，不会清空已有值。相同 `Idempotency-Key` +
+      相同请求体重放时返回**首次**的 `200 IngestResult` 并带
+      `Idempotency-Replayed: true`；同键不同体返回 `409 idempotency_key_reused`。
+
+      **部分成功**：`200` 响应体里的 `items[].status` 逐条给出
+      `accepted` / `duplicate` / `rejected`。单条校验失败（`judge` 未启用、
+      `title` 缺失或超长等）只把该条记为 `rejected`，其余照常写入。
+
+      **整批拒绝**：条目数超过 `capabilities.ingest_batch_max`，默认 500返回
+      `413 payload_too_large`，**整批不入库、无副作用**；请求体非法返回 `400`；
+      语义错误无法定位到单条时返回 `422 validation_failed`；限流 `429`；
+      服务端不可用 `503`。
+
+      **乱序接受**：题目可在其提交记录之后才上报，服务端按自然键 upsert，不要求顺序。
+
+      **时序**：题目写入后 `GET /oj/problems` 的**最终一致**视图才会包含它，
+      `IngestResult.materialized_at` 给出可见时刻，新鲜度上界见 `x-freshness-bound`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/oj_data.yaml#/components/schemas/IngestProblemsRequest
+          example:
+            crawler_run_id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            items:
+              - judge: codeforces
+                external_id: 1873A
+                title: Short Sort
+                tags:
+                  - implementation
+                difficulty: 800
+                rating: 800
+                url: https://codeforces.com/contest/1873/problem/A
+    responses:
+      '200':
+        description: |
+          批次已处理。`items` 与请求条目一一对应，可能是部分成功；
+          重复条目计入 `duplicates` 而不是错误。
+        headers:
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/IngestResult
+            example:
+              accepted: 1
+              duplicates: 0
+              rejected: 0
+              crawler_run_id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              materialized_at: '2024-05-06T07:15:00.000Z'
+              items:
+                - index: 0
+                  status: accepted
+                  id: pbl_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  code: null
+                  message: null
+                  pointer: null
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '413':
+        $ref: ../components/responses/common.yaml#/components/responses/PayloadTooLarge
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+      '503':
+        $ref: ../components/responses/common.yaml#/components/responses/ServiceUnavailable
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT5M

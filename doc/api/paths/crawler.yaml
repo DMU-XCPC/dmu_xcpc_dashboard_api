@@ -1,0 +1,695 @@
+crawlerConfig:
+  get:
+    tags:
+      - crawler
+    operationId: getCrawlerConfig
+    summary: 拉取采集器配置，含代理回退策略
+    description: |
+      采集器**拉取**自身运行配置的只读端点。完全独立的采集器（不与服务器共用数据库）
+      在启动时与之后按周期调用本端点，据此决定采集哪些平台、以什么频率采集、
+      直连失败后回退到哪些代理。
+
+      **权限**：需要 `crawler:read`。采集器凭证通常同时持有 `ingest:write`
+      （写数据）与 `crawler:read`（拉配置）；缺少凭证 `401 unauthenticated`，
+      scope 不足 `403 insufficient_scope`。
+
+      **口令永不回传**：`proxy.proxies[].password` 是只写字段，本端点**任何情况下都不返回
+      明文**；客户端用 `proxy.proxies[].has_password` 判断该代理是否已配置口令。
+      `username` 会正常返回。
+
+      **缓存**：响应带强 `ETag`（值等于 `revision`）。客户端应保存 `ETag` 并在下次请求
+      带 `If-None-Match`，未变化时服务端返回 `304 Not Modified`（无响应体），
+      这是采集器周期性拉配置的推荐做法。
+
+      **时序**：服务器侧配置是强一致的，本端点返回的就是当前生效值；
+      但采集器**在下一次拉取配置前仍会使用本地缓存的旧值**，因此配置变更在采集侧的
+      生效滞后上界为 `schedule.interval`，默认 `PT30M`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 当前生效的采集器配置；不含任何代理口令明文。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/CrawlerConfig
+            example:
+              revision: '7'
+              mode: embedded
+              enabled: true
+              judges:
+                - judge: codeforces
+                  enabled: true
+                  interval: PT15M
+                  max_pages: 20
+                  extra: null
+              schedule:
+                interval: PT30M
+                jitter: PT2M
+                timezone: Asia/Shanghai
+                active_hours:
+                  from: '08:00'
+                  to: '23:30'
+              rate_limit:
+                requests_per_minute: 60
+                concurrency: 2
+              proxy:
+                enabled: true
+                strategy: failover
+                direct_timeout: PT10S
+                no_proxy:
+                  - '*.dmu.edu.cn'
+                proxies:
+                  - id: pxy_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    label: hk-1
+                    url: socks5://10.0.0.9:1080
+                    username: crawler
+                    has_password: true
+                    enabled: true
+                    priority: 10
+                    health:
+                      state: healthy
+                      checked_at: '2024-05-06T07:00:00.000Z'
+                      latency_ms: 128
+                      last_error: null
+              retention:
+                submissions: P2Y
+                runs: P90D
+              updated_at: '2024-05-06T07:00:00.000Z'
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+  patch:
+    tags:
+      - crawler
+    operationId: updateCrawlerConfig
+    summary: 修改采集器配置
+    description: |
+      管理员修改采集器配置。未出现的字段保持不变；**出现的字段整体替换**——
+      `proxy` 是整体替换，包含其中的 `proxies` 数组：要保留的代理必须完整提交，
+      数组里被移除的代理会被删除（其口令一并丢弃）。`mode` 由服务器能力决定、
+      不可通过本端点修改，提交它会被 `422 validation_failed` 拒绝。
+
+      **权限**：需要 `crawler:manage`。缺少凭证 `401 unauthenticated`，
+      scope 不足 `403 insufficient_scope`。
+
+      **幂等**：`Idempotency-Key` 必填。同键 + 同请求体重放返回首次的响应并带
+      `Idempotency-Replayed: true`；同键不同体返回 `409 idempotency_key_reused`。
+
+      **并发控制**：建议带 `If-Match`（上次 `GET` 的 `ETag`）；不匹配返回
+      `412 precondition_failed`（响应体 code 为 `version_conflict`），客户端应重新读取后重试。
+      未带 `If-Match` 时按"最后写入者获胜"处理，但仍会返回新的 `ETag`。
+
+      **代理口令**：`proxies[].password` 只写。省略该字段表示保持原口令不变，
+      传 `null` 表示清除口令；响应永不回传明文，只用 `has_password` 表示是否已设置。
+
+      **时序**：变更在服务器侧**强一致**——本响应返回后，下一次 `GET /crawler/config`
+      立即返回新值（采集器收到新配置后应按新策略执行）。但采集器只有在**下一次拉取配置时**
+      才会看到变更，因此实际生效滞后上界为 `schedule.interval`，默认 `PT30M`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/oj_data.yaml#/components/schemas/CrawlerConfigPatch
+          example:
+            enabled: true
+            schedule:
+              interval: PT15M
+              jitter: PT2M
+              timezone: Asia/Shanghai
+            proxy:
+              enabled: true
+              strategy: failover
+              direct_timeout: PT10S
+              no_proxy:
+                - '*.dmu.edu.cn'
+              proxies:
+                - id: pxy_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  label: hk-1
+                  url: socks5://10.0.0.9:1080
+                  username: crawler
+                  password: s3cr3t-proxy-pass
+                  enabled: true
+                  priority: 10
+    responses:
+      '200':
+        description: 更新后的完整配置；`ETag` 与新的 `revision` 一致，不含代理口令明文。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/CrawlerConfig
+            example:
+              revision: '8'
+              mode: embedded
+              enabled: true
+              judges:
+                - judge: codeforces
+                  enabled: true
+                  interval: PT15M
+                  max_pages: 20
+                  extra: null
+              schedule:
+                interval: PT15M
+                jitter: PT2M
+                timezone: Asia/Shanghai
+                active_hours:
+                  from: '08:00'
+                  to: '23:30'
+              rate_limit:
+                requests_per_minute: 60
+                concurrency: 2
+              proxy:
+                enabled: true
+                strategy: failover
+                direct_timeout: PT10S
+                no_proxy:
+                  - '*.dmu.edu.cn'
+                proxies:
+                  - id: pxy_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    label: hk-1
+                    url: socks5://10.0.0.9:1080
+                    username: crawler
+                    has_password: true
+                    enabled: true
+                    priority: 10
+                    health: null
+              retention:
+                submissions: P2Y
+                runs: P90D
+              updated_at: '2024-05-06T07:20:00.000Z'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+        description: |
+          幂等键冲突：同一 `Idempotency-Key` 曾用于不同的请求体，返回
+          `409 idempotency_key_reused`。请换用新的键重试。
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+crawlerStatus:
+  get:
+    tags:
+      - crawler
+    operationId: getCrawlerStatus
+    summary: 获取采集状态
+    description: |
+      采集健康度总览：总体开关、调度时刻、各平台最近尝试/成功时刻与数据滞后、
+      待物化条目数、代理池概况。供面板展示"采集是否正常运行 / 是否在走代理"。
+
+      **权限**：需要 `crawler:read`。缺少凭证 `401 unauthenticated`，
+      scope 不足 `403 insufficient_scope`。
+
+      **时序**：本视图由采集器心跳与 ingest 元数据**聚合**而来，是
+      **最终一致**的：刚上报的运行或刚写入的条目可能尚未反映在计数里，
+      最大滞后见 `x-freshness-bound`（`PT5M`）。响应中的 `generated_at` 是快照生成时刻，
+      客户端应展示该时刻而不是请求时刻。
+
+      **代理**：`proxy_summary` 按健康状态汇总代理数量，用于确认"直连失败才回退代理"
+      的配置确实生效；未配置任何代理时为 `null`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    responses:
+      '200':
+        description: 采集状态快照。
+        headers:
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/CrawlerStatus
+            example:
+              mode: embedded
+              enabled: true
+              last_run_at: '2024-05-06T07:00:00.000Z'
+              next_run_at: '2024-05-06T07:32:00.000Z'
+              judges:
+                - judge: codeforces
+                  enabled: true
+                  last_attempt_at: '2024-05-06T07:00:00.000Z'
+                  last_success_at: '2024-05-06T07:03:20.000Z'
+                  lag: PT12M
+                  consecutive_failures: 0
+                  last_error: null
+                  using_proxy: false
+                  collected_24h: 512
+              pending_items: 0
+              proxy_summary:
+                healthy: 1
+                unhealthy: 0
+                unknown: 1
+              generated_at: '2024-05-06T07:05:00.000Z'
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT5M
+
+crawlerRuns:
+  get:
+    tags:
+      - crawler
+    operationId: listCrawlerRuns
+    summary: 列出采集器运行记录
+    description: |
+      分页查询采集器运行记录（既包含服务器代管运行，也包含外部采集器上报的运行）。
+      固定按 `started_at` 倒序，游标与排序键绑定：`cursor` 只能来自本端点上一次响应，
+      不能跨过滤条件或跨排序复用。
+
+      **权限**：需要 `crawler:read`。缺少凭证 `401 unauthenticated`，
+      scope 不足 `403 insufficient_scope`。
+
+      **过滤**：`judge`（平台）、`state`（运行状态）、`proxy_used`（是否实际走过代理）、
+      `from` / `to`，按 `started_at` 的半开区间 `[from, to)`。
+      时间参数格式错误返回 `400 bad_request`。
+
+      **时序**：已成功上报/登记的运行记录立即可查（强一致）；`from`/`to` 使用 UTC。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Cursor
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Limit
+      - name: judge
+        in: query
+        required: false
+        description: 只返回该平台的运行记录。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Judge
+        example: codeforces
+      - name: state
+        in: query
+        required: false
+        description: 只返回该状态的运行记录。
+        schema:
+          $ref: ../components/schemas/oj_data.yaml#/components/schemas/CrawlerRunState
+        example: succeeded
+      - name: proxy_used
+        in: query
+        required: false
+        description: |
+          `true` 只返回实际使用过代理（发生过直连失败并回退）的运行；
+          `false` 只返回全程直连的运行；省略表示不筛选。
+        schema:
+          type: boolean
+        example: true
+      - name: from
+        in: query
+        required: false
+        description: 只返回 `started_at` **不早于**该时刻的运行记录，含边界。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-05-01T00:00:00.000Z'
+      - name: to
+        in: query
+        required: false
+        description: 只返回 `started_at` **早于**该时刻的运行记录，不含边界。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-06-01T00:00:00.000Z'
+    responses:
+      '200':
+        description: 运行记录的一页，按 `started_at` 倒序。
+        headers:
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/PagedCrawlerRun
+            example:
+              has_more: true
+              next_cursor: eyJ0IjoiMjAyNC0wNS0wNlQwNzowMDowMC4wMDBaIiwiaWQiOiJydW5fMDFKOFo1VjZRMEszTTdOOVAyUjRUNlc4WDAifQ
+              items:
+                - id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  judge: codeforces
+                  state: succeeded
+                  trigger: schedule
+                  started_at: '2024-05-06T07:00:00.000Z'
+                  finished_at: '2024-05-06T07:03:20.000Z'
+                  counts:
+                    fetched: 120
+                    accepted: 96
+                    duplicates: 23
+                    rejected: 1
+                    failed: 0
+                  proxy_used: false
+                  proxy_failures: 0
+                  error: null
+                  report_note: null
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+  post:
+    tags:
+      - crawler
+    operationId: reportCrawlerRun
+    summary: 上报一次采集器运行
+    description: |
+      **外部采集器**（不与服务器共用数据库、通过 API 写入数据的形态）上报自己的一次运行：
+      抓了多少条、写入/重复/拒绝/失败各多少、是否走了代理。用于让面板展示采集健康度，
+      并与 `POST /crawler/trigger` 区分开——**这是两条互不影响的路**：
+
+      - `POST /crawler/runs`（本端点）：只**登记**上报方自己已经发生的运行，不触发任何抓取；
+        需要 `ingest:write`，因为它属于采集器数据写入通道。
+      - `POST /crawler/trigger`：请求**服务器代管**去抓取，只有
+        `capabilities.crawler_embedded = true` 时可用，需要 `crawler:manage`。
+
+      同一采集器可以只调用其一，也可以两者都调用，例如代管运行也回报明细。
+
+      **权限**：需要 `ingest:write`。缺少凭证 `401 unauthenticated`，
+      scope 不足 `403 insufficient_scope`。
+
+      **幂等**：`Idempotency-Key` 必填。相同键重放**返回同一个 `CrawlerRun`**
+      （不新建记录）并带 `Idempotency-Replayed: true`；相同键配不同请求体返回
+      `409 idempotency_key_reused`。
+
+      **语义校验**：`state` 为终态（`succeeded` / `failed` / `partial`）时
+      `finished_at` 必填且不得早于 `started_at`，否则 `422 validation_failed`。
+
+      **时序**：登记立即生效（强一致），`Location` 指向的 `GET /crawler/runs/{run_id}`
+      随即返回该记录。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/oj_data.yaml#/components/schemas/CrawlerRunReportRequest
+          example:
+            judge: codeforces
+            state: partial
+            trigger: api
+            started_at: '2024-05-06T07:00:00.000Z'
+            finished_at: '2024-05-06T07:03:20.000Z'
+            counts:
+              fetched: 120
+              accepted: 96
+              duplicates: 23
+              rejected: 1
+              failed: 0
+            proxy_used: true
+            proxy_failures: 0
+            error: null
+    responses:
+      '201':
+        description: "运行记录已登记。重放时返回同一记录并带 `Idempotency-Replayed: true`。"
+        headers:
+          Location:
+            $ref: ../components/headers/common.yaml#/components/headers/Location
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/CrawlerRun
+            example:
+              id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              judge: codeforces
+              state: partial
+              trigger: api
+              started_at: '2024-05-06T07:00:00.000Z'
+              finished_at: '2024-05-06T07:03:20.000Z'
+              counts:
+                fetched: 120
+                accepted: 96
+                duplicates: 23
+                rejected: 1
+                failed: 0
+              proxy_used: true
+              proxy_failures: 0
+              error: null
+              report_note: null
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+        description: |
+          幂等键冲突：同一 `Idempotency-Key` 曾用于不同的请求体，返回
+          `409 idempotency_key_reused`。相同键 + 相同请求体会返回 `201` 与
+          `Idempotency-Replayed: true`，而不是本错误。
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+crawlerRun:
+  get:
+    tags:
+      - crawler
+    operationId: getCrawlerRun
+    summary: 获取单次采集器运行
+    description: |
+      按 id 读取一条采集器运行记录（服务器代管运行与外部上报运行共用同一资源）。
+
+      **权限**：需要 `crawler:read`。缺少凭证 `401 unauthenticated`，
+      scope 不足 `403 insufficient_scope`。
+
+      **可见性**：`run_id` 不存在时返回 `404 not_found`；运行记录超过
+      `CrawlerConfig.retention.runs` 保留期后被清理，此后同样返回 `404`。
+
+      **时序**：强一致，返回已登记记录的当前状态（仍在 `running` 的记录
+      `finished_at` 为 `null`）。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: run_id
+        in: path
+        required: true
+        description: 采集器运行记录 id，前缀 `run_`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+    responses:
+      '200':
+        description: 运行记录。
+        headers:
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/CrawlerRun
+            example:
+              id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              judge: codeforces
+              state: succeeded
+              trigger: schedule
+              started_at: '2024-05-06T07:00:00.000Z'
+              finished_at: '2024-05-06T07:03:20.000Z'
+              counts:
+                fetched: 120
+                accepted: 96
+                duplicates: 23
+                rejected: 1
+                failed: 0
+              proxy_used: false
+              proxy_failures: 0
+              error: null
+              report_note: null
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+crawlerTrigger:
+  post:
+    tags:
+      - crawler
+    operationId: triggerCrawlerRun
+    summary: 请求服务器代管触发一次采集
+    description: |
+      让**服务器代管的采集器进程**立即采集某个平台，返回一个异步任务。
+
+      **先认几个词**：采集器有 `embedded` 与 `external` 两种部署模式——`embedded`
+      表示服务器自己代管采集器进程，`external` 表示采集器独立部署、只通过
+      `POST /ingest/oj/*` 写入；本端点只在 `embedded` 下可用，即
+      `GET /meta` 的 `capabilities.crawler_embedded = true`。
+      代理回退策略 `strategy` 取 `failover`（直连失败后按序换代理）、
+      `round_robin`（每次请求轮换代理）、`always`（一律走代理）；
+      `schedule.interval` 是定时采集的间隔，`direct_timeout` 是直连超时。
+      这些字段的完整定义见 `CrawlerConfig`。
+
+      **权限**：需要 `crawler:manage`。缺少凭证 `401 unauthenticated`，
+      scope 不足 `403 insufficient_scope`。
+
+      **幂等**：`Idempotency-Key` 必填。同键 + 同请求体重放返回**首次创建的任务**
+      （同一个 `job_id`）并带 `Idempotency-Replayed: true`；同键不同体返回
+      `409 idempotency_key_reused`。注意幂等键只保证"不重复创建任务"，
+      不保证任务成功。
+
+      **副作用与状态机**：成功接受时**立即创建**一个 `kind = crawler_run` 的任务并返回
+      `202 Accepted` 与 `Location: /jobs/{job_id}`；任务随后从 `queued` 进入 `running`，
+      最终落到 `succeeded` / `failed` / `cancelled`，可用 `POST /jobs/{job_id}/cancel` 取消，
+      仅 `queued` / `running` 可取消。真正写入的数据由采集器通过 ingest 通道落库，
+      因此本端点不直接产生 OJ 数据。
+
+      **错误分支**：
+
+      - `409 crawler_not_embedded`：服务器不代管采集器
+        （`capabilities.crawler_embedded = false`）；调用方应改为自行运行采集器并通过
+        `POST /ingest/oj/*` 写入、用 `POST /crawler/runs` 上报运行。
+      - `409 crawler_run_in_progress`：该 `judge` 已有 `queued` / `running` 的采集任务，
+        等服务端返回的 `Retry-After` 或轮询任务终态后重试。
+      - `404 not_found`：`judge` 未在 `capabilities.judges` 内启用
+        （避免泄露未启用的平台），或该平台没有可用的采集配置。
+
+      **时序**：任务创建是强一致的；`202` 只表示任务已被接受，不代表已经开始抓取。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/oj_data.yaml#/components/schemas/TriggerCrawlerRunRequest
+          example:
+            judge: codeforces
+            full: false
+            since: '2024-05-01T00:00:00.000Z'
+    responses:
+      '202':
+        description: |
+          已接受采集任务；`Location` 指向 `GET /jobs/{job_id}`，
+          客户端按 `Retry-After` 轮询直到终态。
+        headers:
+          Location:
+            $ref: ../components/headers/common.yaml#/components/headers/Location
+          Retry-After:
+            $ref: ../components/headers/common.yaml#/components/headers/RetryAfter
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/components/schemas/Job
+            example:
+              id: job_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              kind: crawler_run
+              state: queued
+              progress:
+                percent: 0
+                message: 等待调度器分配采集任务
+              result: null
+              error: null
+              created_at: '2024-05-06T07:08:09.123Z'
+              started_at: null
+              finished_at: null
+              expires_at: '2024-05-07T07:08:09.123Z'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+        description: |
+          两种互斥的冲突：
+
+          - `409 crawler_not_embedded`：本服务器不代管采集器
+            （`GET /meta` 的 `capabilities.crawler_embedded = false`），
+            无法接受代管触发；请自行运行采集器并走 `POST /ingest/oj/*`。
+          - `409 crawler_run_in_progress`：该 `judge` 已有 `queued` / `running`
+            的采集任务；请等待其结束（`GET /crawler/runs?judge=...&state=running`）后重试。
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+      '503':
+        $ref: ../components/responses/common.yaml#/components/responses/ServiceUnavailable
+    x-idempotent: true
+    x-consistency: strong

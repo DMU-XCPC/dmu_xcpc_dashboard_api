@@ -1,0 +1,1062 @@
+members:
+  get:
+    tags:
+      - members
+    operationId: listMembers
+    summary: 列出成员
+    description: |
+      **用途**：拉社团名单、按年级/专业/队伍/是否成员筛人——填表、点名、组队、
+      导出前的预览都走这里。要管账号、权限或凭证请用 `accounts`，那是同一主体的另一视角。
+
+      **权限**：需要 `member:read`；缺少该 scope 返回 `403 insufficient_scope`。
+
+      **PII 脱敏**：学号、邮箱、电话、QQ 属于个人身份信息。**读自己**或持有
+      `member:read_pii` 时原样返回；否则这些字段返回 `null`，并在
+      `profile.masked_fields` 里列出被隐藏的字段名（见 `PrincipalProfile.masked_fields`）。
+      默认 `user` 模板**不含** `member:read_pii`，管理员模板 `manager` 含。
+
+      **语义**：返回成员名单。**权威判定**是社团注册记录：`clubs` 非空，即
+      `profile.club_memberships` 里至少有一个 `active` 社团，就算在名单里。标签不参与
+      这个判断。默认只返回在名单里的主体，`include_non_members=true`
+      时连不在名单里的主体一并返回。
+      `q` 同时匹配展示名、用户名与学号；`label` 可重复出现，多个标签之间为 AND；
+      `team_id` 只返回当前赛季属于该队伍的成员；`activity_state` 按派生活动度过滤；
+      `updated_since` 只返回 `updated_at` 严格晚于该时刻的成员，用于增量同步。
+
+      **时序与一致性**：`activity` 及其派生字段 `activity_state`、`*_30d` 由后台
+      汇总任务写入，可能滞后于已接受的写入，**滞后上界 15 分钟**，见 `x-freshness-bound`。
+      `profile`、`labels`、`scopes`、`status`、`revision` 等强一致字段不在此列。
+
+      **副作用**：无，只读。**幂等**：是。**缓存**：可缓存，见 `x-cacheable`，
+      离线客户端可结合 `updated_since` 做增量刷新。
+
+      **错误分支**：未知 `sort`/`activity_state`/`status` 值或非法 `updated_since`
+      返回 `400 bad_request`；`team_id` 指向不存在的队伍时返回空列表而非 `404`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: q
+        in: query
+        required: false
+        description: 模糊搜索：匹配展示名、用户名与学号（大小写不敏感）；空白字符会被去除。
+        schema:
+          type: string
+          maxLength: 64
+        example: 张
+      - name: label
+        in: query
+        required: false
+        description: |
+          标签过滤，可重复出现，例如 `?label=member&label=2022`；
+          多个 `label` 之间为 AND，即必须同时具备全部标签。
+        style: form
+        explode: true
+        schema:
+          type: array
+          maxItems: 20
+          items:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/Label
+        example:
+          - member
+          - '2022'
+      - name: team_id
+        in: query
+        required: false
+        description: 限定队伍（当前赛季）的成员。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: enrollment_year
+        in: query
+        required: false
+        description: 入学年份精确匹配。
+        schema:
+          type: integer
+          minimum: 1990
+          maximum: 2100
+        example: 2022
+      - name: major
+        in: query
+        required: false
+        description: 专业精确匹配。
+        schema:
+          type: string
+          maxLength: 80
+        example: 计算机科学与技术
+      - name: club
+        in: query
+        required: false
+        description: |
+          按社团身份过滤：只返回在指定社团处于 `active` 的成员。可重复传参，
+          命中任一社团即返回。省略时不过滤。
+          **两个社团的名单不同**，因此没有单一的"是否在册"布尔值可选。
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/ClubCode
+          minItems: 1
+          maxItems: 2
+        style: form
+        explode: true
+        example:
+          - acm_icpc
+      - name: club_match
+        in: query
+        required: false
+        description: |
+          与 `club` 组合决定匹配方式，只在给了 `club` 时有意义：
+          `any` 是命中任一社团（默认），`all` 要求同时属于列出的所有社团，
+          `none` 要求不属于其中任何一个。两个社团的名单不同，这三种问法都需要：
+          要"两个社团都注册的人"用 `all`，要"只在软件部、不在学社"可以先按
+          `any` 取并集、再按 `all` 取交集相减，要"完全不在名单里"用 `club=none`。
+        schema:
+          type: string
+          enum:
+            - any
+            - all
+            - none
+          default: any
+        example: all
+      - name: status
+        in: query
+        required: false
+        description: 账号状态；省略时 `active` 与 `disabled` 都返回。
+        schema:
+          $ref: ../components/schemas/identity.yaml#/components/schemas/AccountStatus
+        example: active
+      - name: activity_state
+        in: query
+        required: false
+        description: |
+          活动度分档过滤：`active` 是最近 90 天内有活跃，`dormant` 是超过 90 天但不超过
+          365 天，`inactive` 是超过 365 天或从未活跃。
+        schema:
+          type: string
+          enum:
+            - active
+            - dormant
+            - inactive
+        example: active
+      - name: include_non_members
+        in: query
+        required: false
+        description: |
+          默认 `false`，只返回成员名单里的主体，即 `clubs` 非空；传 `true` 时把不在任何社团的
+          主体也返回，用于排查"曾经是成员、现在两个社团都退了"。与 `club=none` 的区别是：
+          前者看的是"是否在任何社团"，后者只在按社团筛的语义下排除。
+        schema:
+          type: boolean
+          default: false
+        example: true
+      - $ref: ../components/parameters/common.yaml#/components/parameters/UpdatedSince
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Page
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Size
+      - name: sort
+        in: query
+        required: false
+        description: |
+          排序键：`display_name`（默认）、`enrollment_year`、`last_active_at`、`created_at`、
+          `updated_at`。
+          `last_active_at` 是派生字段，排序结果同样受 15 分钟滞后影响。
+        schema:
+          type: string
+          enum:
+            - display_name
+            - enrollment_year
+            - last_active_at
+            - created_at
+            - updated_at
+          default: display_name
+        example: display_name
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Order
+    responses:
+      '200':
+        description: 成员的分页结果。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/roster.yaml#/components/schemas/PagedMember
+            example:
+              page: 1
+              size: 20
+              total: 137
+              has_next: true
+              items:
+                - id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  username: alice
+                  display_name: 张三
+                  kind: human
+                  labels:
+                    - member
+                    - '2022'
+                  scopes:
+                    - account:self
+                    - member:read
+                  profile:
+                    student_id: '2220210000'
+                    enrollment_year: 2022
+                    grade: 2022级
+                    major: 计算机科学与技术
+                    club_memberships:
+                      - club: acm_icpc
+                        status: active
+                        registered_at: '2023-09-20'
+                        role: 成员
+                    email: alice@example.edu.cn
+                  status: active
+                  disabled_at: null
+                  last_active_at: '2024-05-06T07:08:09.123Z'
+                  created_at: '2023-09-01T02:00:00.000Z'
+                  updated_at: '2024-05-06T07:08:09.123Z'
+                  revision: '17'
+                  clubs:
+                    - acm_icpc
+                    - safewind_software
+                  activity:
+                    by_club:
+                      - club: acm_icpc
+                        status: active
+                        registered_at: '2024-03-01'
+                        last_active_at: '2024-05-06T07:08:09.123Z'
+                        active_days: 21
+                        submissions: 84
+                    last_active_at: '2024-05-06T07:08:09.123Z'
+                    last_login_at: '2024-05-06T07:00:00.000Z'
+                    last_api_use_at: '2024-05-06T07:08:09.123Z'
+                    last_oj_activity_at: '2024-05-05T18:20:00.000Z'
+                    activity_state: active
+                    active_days_30d: 21
+                    solved_count_30d: 37
+                    submissions_30d: 84
+                    computed_at: '2024-05-06T07:10:00.000Z'
+                  teams:
+                    - id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                      name: DMU-1
+                  oj_handles:
+                    - id: ojh_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                      judge: codeforces
+                      judge_label: null
+                      handle: alice
+                      verified: true
+                      latest_rating: 1834
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT15M
+    x-cacheable: true
+
+membersImport:
+  post:
+    tags:
+      - members
+    operationId: importMembers
+    summary: 批量导入成员
+    description: |
+      **用途**：开学或平时批量维护成员名单——一次导入一批人，可含学号、年级、专业、
+      社团注册、OJ 绑定与初始标签，撞名时按 `on_conflict` 决定跳过、覆盖还是整体报错。
+
+      **权限**：需要 `member:manage`；缺少该 scope 返回 `403 insufficient_scope`。
+      导入包含学号、电话等 PII，因此即使调用者能读成员名单也不能导入。
+
+      **语义**：`format=csv` 时解析 `csv` 字段，`format=json` 时解析 `members`
+      数组。整批在**单个事务**内按 `on_conflict` 处理：
+      `skip` 跳过冲突行（计入 `skipped`）、`update` 覆盖已有档案（计入 `updated`）、
+      `fail` 在存在冲突时不写入任何行并整体返回 `409 conflict`。
+
+      **部分成功**：行级校验失败**不阻断其它行**，失败明细在 `rows[]` 里逐行给出
+      （`action=failed` + `errors[]`），计数 `created+updated+skipped+failed`
+      等于提交的行数；`dry_run=true` 时只做校验与计数，不落库、不分配 id。
+
+      **幂等**：必须携带 `Idempotency-Key`。同一主体 + 同一端点 + 同一键在保留期内
+      重放返回**首次**的响应，并带 `Idempotency-Replayed: true`，因此重复导入同一批
+      不会产生重复成员；请求体不同则返回 `409 idempotency_key_reused`。
+
+      **本接口返回 `200` 而非 `201`**：这是集合级批量操作，不产生单一新资源，
+      且同一批数据重放的结果与首次一致。
+
+      **副作用**：新建的主体初始**没有口令与凭证**，需管理员用
+      `POST /accounts/{account_id}/password-reset` 设置初始口令后才能登录；写入审计记录，含发起者与计数。**时序**：强一致，响应返回时事务已提交，
+      逐行结果立即可用。
+
+      **错误分支**：行数超过单批上限 **1000 行**、或请求体过大 → `413 payload_too_large`；
+      `format` 与载荷字段不匹配、CSV 缺少必需列头、行内字段非法 → `422 validation_failed`；
+      `on_conflict=fail` 且存在冲突 → `409 conflict`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/roster.yaml#/components/schemas/ImportRequest
+          example:
+            format: csv
+            csv: |
+              username,display_name,student_id,enrollment_year,major,email,clubs,labels,oj_handles
+              alice,张三,2220210000,2022,计算机科学与技术,alice@example.edu.cn,acm_icpc|safewind_software,member|2022,codeforces:alice|atcoder:alice
+            on_conflict: skip
+            dry_run: false
+    responses:
+      '200':
+        description: 导入结果（逐行结果 + 汇总计数）。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/roster.yaml#/components/schemas/ImportResult
+            example:
+              dry_run: false
+              created: 1
+              updated: 0
+              skipped: 1
+              failed: 1
+              rows:
+                - row_number: 2
+                  action: created
+                  principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  errors: []
+                - row_number: 3
+                  action: skipped
+                  principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+                  errors: []
+                - row_number: 4
+                  action: failed
+                  principal_id: null
+                  errors:
+                    - pointer: /email
+                      message: email 格式非法
+                      code: format
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '413':
+        $ref: ../components/responses/common.yaml#/components/responses/PayloadTooLarge
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+member:
+  get:
+    tags:
+      - members
+    operationId: getMember
+    summary: 获取成员详情
+    description: |
+      **用途**：看**一个人**的完整成员名单信息——档案（学号/年级/专业/社团注册）、标签、
+      scope、队伍归属、OJ 绑定与活跃度。账号状态与凭证请配合 `GET /accounts/{account_id}` 看。
+
+      **权限**：需要 `member:read`。
+
+      **PII 脱敏**：学号、邮箱、电话、QQ 属于个人身份信息。**读自己**或持有
+      `member:read_pii` 时原样返回；否则这些字段返回 `null`，并在
+      `profile.masked_fields` 里列出被隐藏的字段名（见 `PrincipalProfile.masked_fields`）。
+      默认 `user` 模板**不含** `member:read_pii`，管理员模板 `manager` 含。
+
+      **语义**：返回成员信息视图：主体本体 + 档案 + 标签 + scope + 队伍引用 +
+      OJ 绑定引用 + 活动度。`member_id` **就是主体 id**，与 `/accounts/{account_id}`
+      是同一标识空间（没有 `mem_` 前缀），两个视图共享同一份数据与同一个 `ETag`——
+      `Member` 是投影，不是第二种身份，见 `README.md` §3 术语。
+      `clubs: []`（主体存在但已不属于任何社团）时仍返回 `200`，
+      便于展示历史成绩引用方的详情——调用方应以该字段判断是否是成员。
+
+      **缓存与并发**：返回 `ETag`（与 `revision` 一致）；`If-None-Match` 命中返回
+      `304`。`ETag` 只覆盖强一致字段（档案、标签、scope、状态），派生 `activity`
+      的刷新不会改变 `ETag`。
+
+      **时序**：`activity` 由后台汇总任务写入，最多滞后 15 分钟
+      （`x-freshness-bound: PT15M`）；其余字段强一致。
+
+      **副作用**：无，只读。**幂等**：是。
+
+      **错误分支**：`{member_id}` 不存在或对该主体不可见 → `404 not_found`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: member_id
+        in: path
+        required: true
+        description: '主体 id，前缀 `acc_`，与 `account_id` 同一标识空间——成员没有独立 id。'
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 成员详情。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/roster.yaml#/components/schemas/Member
+            example:
+              id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              username: alice
+              display_name: 张三
+              kind: human
+              labels:
+                - member
+                - '2022'
+              scopes:
+                - account:self
+                - member:read
+              profile:
+                student_id: '2220210000'
+                enrollment_year: 2022
+                grade: 2022级
+                major: 计算机科学与技术
+                club_memberships:
+                  - club: acm_icpc
+                    status: active
+                    registered_at: '2023-09-20'
+                    role: 成员
+                email: alice@example.edu.cn
+                phone: '13800000000'
+                qq: '10001'
+              status: active
+              disabled_at: null
+              last_active_at: '2024-05-06T07:08:09.123Z'
+              created_at: '2023-09-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:08:09.123Z'
+              revision: '17'
+              clubs:
+                - acm_icpc
+                - safewind_software
+              activity:
+                by_club:
+                  - club: acm_icpc
+                    status: active
+                    registered_at: '2024-03-01'
+                    last_active_at: '2024-05-06T07:08:09.123Z'
+                    active_days: 21
+                    submissions: 84
+                last_active_at: '2024-05-06T07:08:09.123Z'
+                last_login_at: '2024-05-06T07:00:00.000Z'
+                last_api_use_at: '2024-05-06T07:08:09.123Z'
+                last_oj_activity_at: '2024-05-05T18:20:00.000Z'
+                activity_state: active
+                active_days_30d: 21
+                solved_count_30d: 37
+                submissions_30d: 84
+                computed_at: '2024-05-06T07:10:00.000Z'
+              teams:
+                - id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  name: DMU-1
+              oj_handles:
+                - id: ojh_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  judge: codeforces
+                  judge_label: null
+                  handle: alice
+                  verified: true
+                  latest_rating: 1834
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT15M
+    x-cacheable: true
+  patch:
+    tags:
+      - members
+    operationId: updateMemberProfile
+    summary: 修改成员档案
+    description: |
+      **权限**：需要 `member:manage`；缺少该 scope 返回 `403 insufficient_scope`。
+
+      **语义**：合并式更新 `display_name` 与 `profile`——只覆盖请求中出现的字段，
+      未出现的字段保持不变。`username`、`kind`、`status`、`labels`、`scopes`
+      不可通过本接口修改（分别走 `PUT /members/{member_id}/labels` 与
+      `PUT /members/{member_id}/scopes`）。空请求体（`{}`）返回 `422 validation_failed`。
+
+      **并发**：支持 `If-Match` + `revision` 乐观并发控制；与当前 `ETag` 不一致
+      返回 `412 precondition_failed`。省略 `If-Match` 时为 last-write-wins，
+      并发的两次更新以最后提交者为准。
+
+      **幂等**：必须携带 `Idempotency-Key`；同一键重放返回首次响应（不重复写审计）。
+      重复提交同一份数据（不并发）结果收敛，但每次都会推进 `revision`。
+
+      **副作用**：更新 `updated_at`/`revision`，写审计记录；学号冲突（已被他人占用）
+      返回 `409 conflict`。**时序**：强一致，响应中的 `display_name`/`profile`
+      已包含本次写入。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: member_id
+        in: path
+        required: true
+        description: '主体 id，前缀 `acc_`，与 `account_id` 同一标识空间——成员没有独立 id。'
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/roster.yaml#/components/schemas/UpdateMemberRequest
+          example:
+            display_name: 张三（队长）
+            profile:
+              major: 软件工程
+              phone: '13800000001'
+    responses:
+      '200':
+        description: 更新后的成员详情。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/roster.yaml#/components/schemas/Member
+            example:
+              id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              username: alice
+              display_name: 张三（队长）
+              kind: human
+              labels:
+                - member
+                - '2022'
+              scopes:
+                - account:self
+                - member:read
+              profile:
+                student_id: '2220210000'
+                enrollment_year: 2022
+                grade: 2022级
+                major: 软件工程
+                club_memberships:
+                  - club: acm_icpc
+                    status: active
+                    registered_at: '2024-03-01'
+                    role: 成员
+                email: alice@example.edu.cn
+                phone: '13800000001'
+              status: active
+              created_at: '2023-09-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:30:00.000Z'
+              revision: '18'
+              clubs:
+                - acm_icpc
+                - safewind_software
+              activity:
+                by_club:
+                  - club: acm_icpc
+                    status: active
+                    registered_at: '2024-03-01'
+                    last_active_at: '2024-05-06T07:08:09.123Z'
+                    active_days: 21
+                    submissions: 84
+                last_active_at: '2024-05-06T07:08:09.123Z'
+                last_login_at: '2024-05-06T07:00:00.000Z'
+                last_api_use_at: '2024-05-06T07:08:09.123Z'
+                last_oj_activity_at: '2024-05-05T18:20:00.000Z'
+                activity_state: active
+                active_days_30d: 21
+                solved_count_30d: 37
+                submissions_30d: 84
+                computed_at: '2024-05-06T07:10:00.000Z'
+              teams: []
+              oj_handles: []
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+memberLabels:
+  put:
+    tags:
+      - members
+    operationId: setMemberLabels
+    summary: 替换成员标签
+    description: |
+      **权限**：需要 `member:assign`（标签本身不授予权限，但决定成员名单归属，
+      因此与 scope 同级别管理）。
+
+      **语义**：**全量替换**成员标签集合，不是增量。请求中的 `labels` 即替换后的
+      最终状态（服务端去重）。
+
+      **副作用**：只改变标签本身，**不会**改变成员资格。`clubs` 由社团注册记录决定，
+      因此增删标签不会让人进出名单，只会改变按标签筛选的结果；要让某人退出某个社团，
+      用 `PUT /members/{member_id}/clubs` 把该社团置为 `alumni` 或不提交。
+
+      **并发**：支持 `If-Match` + `revision`；不匹配返回 `412 precondition_failed`。
+      省略时为 last-write-wins。**幂等**：必须携带 `Idempotency-Key`；重复提交同一
+      集合结果收敛（但每次都会推进 `revision`）。
+
+      **时序**：强一致，响应中的 `labels` 即本次写入后的状态。写审计记录。
+
+      **错误分支**：标签格式非法（小写、长度 1..40、字符集受限）→ `422 validation_failed`；
+      成员不存在 → `404 not_found`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: member_id
+        in: path
+        required: true
+        description: '主体 id，前缀 `acc_`，与 `account_id` 同一标识空间——成员没有独立 id。'
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/roster.yaml#/components/schemas/SetMemberLabelsRequest
+          example:
+            labels:
+              - member
+              - '2022'
+              - team-captain
+    responses:
+      '200':
+        description: 更新后的成员详情（`labels` 为替换后的完整集合）。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/roster.yaml#/components/schemas/Member
+            example:
+              id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              username: alice
+              display_name: 张三
+              kind: human
+              labels:
+                - member
+                - '2022'
+                - team-captain
+              scopes:
+                - account:self
+                - member:read
+              status: active
+              created_at: '2023-09-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:40:00.000Z'
+              revision: '19'
+              clubs:
+                - acm_icpc
+                - safewind_software
+              activity:
+                by_club:
+                  - club: acm_icpc
+                    status: active
+                    registered_at: '2024-03-01'
+                    last_active_at: '2024-05-06T07:08:09.123Z'
+                    active_days: 21
+                    submissions: 84
+                last_active_at: '2024-05-06T07:08:09.123Z'
+                last_login_at: '2024-05-06T07:00:00.000Z'
+                last_api_use_at: '2024-05-06T07:08:09.123Z'
+                last_oj_activity_at: '2024-05-05T18:20:00.000Z'
+                activity_state: active
+                active_days_30d: 21
+                solved_count_30d: 37
+                submissions_30d: 84
+                computed_at: '2024-05-06T07:10:00.000Z'
+              teams: []
+              oj_handles: []
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+memberScopes:
+  put:
+    tags:
+      - members
+    operationId: setMemberScopes
+    summary: 替换成员权限
+    description: |
+      **权限**：需要 `member:assign`；缺少该 scope 返回 `403 insufficient_scope`。
+
+      **语义**：**全量替换**成员的 scope 集合，不是增量。请求中的 `scopes` 即替换后的
+      最终状态（服务端去重）。
+
+      **提权限制**：调用者**不得授予自己不持有的 scope**——请求中任一 scope
+      超出调用者自身的有效 scope 集合，按 `*` 与 `<资源>:*` 展开后比较时，
+      整个请求返回 `403 insufficient_scope`，**不做部分授予**。回收权限不受此限制，
+      但不能回收调用者自身凭证所需的 scope（否则 `403 forbidden`）。
+
+      **并发**：支持 `If-Match` + `revision`；不匹配返回 `412 precondition_failed`。
+
+      **幂等**：必须携带 `Idempotency-Key`。**副作用**：立即影响该主体后续请求的授权
+      判定与现有 `session` 凭证的生效 scope（传播延迟 ≤60 秒，见 README）；写审计记录。
+
+      **时序**：响应返回时新 scope 已持久化，但已在飞行中的请求可能仍按旧 scope 通过
+      （传播上界 60 秒）。**错误分支**：未知资源前缀/动作 → `422 validation_failed`；
+      成员不存在 → `404 not_found`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: member_id
+        in: path
+        required: true
+        description: '主体 id，前缀 `acc_`，与 `account_id` 同一标识空间——成员没有独立 id。'
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/roster.yaml#/components/schemas/SetMemberScopesRequest
+          example:
+            scopes:
+              - account:self
+              - member:read
+              - oj:read
+    responses:
+      '200':
+        description: 更新后的成员详情（`scopes` 为替换后的完整集合）。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/roster.yaml#/components/schemas/Member
+            example:
+              id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              username: alice
+              display_name: 张三
+              kind: human
+              labels:
+                - member
+              scopes:
+                - account:self
+                - member:read
+                - oj:read
+              status: active
+              created_at: '2023-09-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:45:00.000Z'
+              revision: '20'
+              clubs:
+                - acm_icpc
+                - safewind_software
+              activity:
+                by_club:
+                  - club: acm_icpc
+                    status: active
+                    registered_at: '2024-03-01'
+                    last_active_at: '2024-05-06T07:08:09.123Z'
+                    active_days: 21
+                    submissions: 84
+                last_active_at: '2024-05-06T07:08:09.123Z'
+                last_login_at: '2024-05-06T07:00:00.000Z'
+                last_api_use_at: '2024-05-06T07:08:09.123Z'
+                last_oj_activity_at: '2024-05-05T18:20:00.000Z'
+                activity_state: active
+                active_days_30d: 21
+                solved_count_30d: 37
+                submissions_30d: 84
+                computed_at: '2024-05-06T07:10:00.000Z'
+              teams: []
+              oj_handles: []
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+memberClubs:
+  put:
+    tags:
+      - members
+    operationId: setMemberClubs
+    summary: 替换成员的社团身份
+    description: |
+      **用途**：登记或修改某人属于哪些社团。集训队挂靠海风社团软件部 Safewind 与 ACM/ICPC 学社
+      两个社团，成员可以只注册其中一个，也可以两个都注册，本接口整体替换这两条注册记录。
+
+      **权限**：需要 `member:manage`，与维护档案同级。
+
+      **语义**：**整体替换**，不是增量。请求里的 `memberships` 即替换后的完整集合：
+      未出现的社团会被置为 `alumni` 并保留 `registered_at`，不会删除记录，以便历史留档；
+      同一社团重复出现返回 `422 validation_failed`。传空数组表示两个社团都退出，
+      该成员随即从 `GET /members` 的社团筛选里消失，但主体、凭证与历史数据都保留。
+
+      **副作用**：立即改变 `Member.clubs`，并改变 `Member.activity.by_club` 的统计口径
+      （按社团只统计在册期间的活跃）；写审计记录。
+
+      **并发**：支持 `If-Match` + `revision`；不匹配返回 `412 precondition_failed`。
+      **幂等**：必须携带 `Idempotency-Key`；重复提交同一集合结果收敛，但每次都会推进 `revision`。
+
+      **错误分支**：`club` 不在枚举内、`registered_at` 格式非法、`ended_at` 早于
+      `registered_at` → `422 validation_failed`；成员不存在 → `404 not_found`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: member_id
+        in: path
+        required: true
+        description: '主体 id（`acc_` 前缀；与 `account_id` 同一标识空间——成员没有独立 id）。'
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/roster.yaml#/components/schemas/SetMemberClubsRequest
+          example:
+            memberships:
+              - club: acm_icpc
+                status: active
+                registered_at: '2024-03-01'
+                role: 成员
+    responses:
+      '200':
+        description: 更新后的成员详情，`clubs` 为替换后的有效社团集合。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/roster.yaml#/components/schemas/Member
+            example:
+              id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              username: alice
+              display_name: 张三
+              kind: human
+              labels:
+                - member
+              scopes:
+                - account:self
+                - member:read
+              profile:
+                student_id: '2220210000'
+                enrollment_year: 2022
+                club_memberships:
+                  - club: acm_icpc
+                    status: active
+                    registered_at: '2024-03-01'
+                    role: 成员
+              status: active
+              created_at: '2023-09-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:40:00.000Z'
+              revision: '19'
+              clubs:
+                - acm_icpc
+              activity:
+                by_club:
+                  - club: acm_icpc
+                    status: active
+                    registered_at: '2024-03-01'
+                    last_active_at: '2024-05-06T07:08:09.123Z'
+                    active_days: 21
+                    submissions: 84
+                last_active_at: '2024-05-06T07:08:09.123Z'
+                last_oj_activity_at: '2024-05-05T18:20:00.000Z'
+                activity_state: active
+                computed_at: '2024-05-06T07:10:00.000Z'
+              teams: []
+              oj_handles: []
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+memberActivity:
+  get:
+    tags:
+      - members
+    operationId: getMemberActivity
+    summary: 获取成员活动度
+    description: |
+      **权限**：需要 `member:read`；缺少该 scope 返回 `403 insufficient_scope`。
+
+      **语义**：返回活动度的派生视图。`window` 只影响 `active_days_30d`、
+      `solved_count_30d`、`submissions_30d` 三个统计字段的回看窗口，默认 `P90D`，
+      最大 `P730D`，字段名中的 `_30d` 保持不变；`activity_state` 恒按
+      ≤90/≤365/>365 天的固定口径计算，不受 `window` 影响。
+
+      **时序**：派生数据由后台汇总任务写入，可能滞后于已接受的写入，**滞后上界 15 分钟**；
+      `computed_at` 给出本次派生值的计算时刻，客户端应据此展示"数据截至时间"。
+      刚发生的登录/OJ 提交可能需要等到下一次汇总才出现。
+
+      **副作用**：无，只读。**幂等**：是。**缓存**：可缓存，见 `x-cacheable`，
+      但客户端应尊重 `computed_at` 而非本地时钟。
+
+      **错误分支**：`window` 不是合法 ISO-8601 时长或超过 `P730D` → `400 bad_request`；
+      成员不存在或不可见 → `404 not_found`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: member_id
+        in: path
+        required: true
+        description: '主体 id，前缀 `acc_`，与 `account_id` 同一标识空间——成员没有独立 id。'
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: window
+        in: query
+        required: false
+        description: |
+          统计回看窗口（ISO-8601 时长），默认 `P90D`，最大 `P730D`；
+          超出上限或格式非法返回 `400 bad_request`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Duration
+          default: P90D
+        example: P90D
+    responses:
+      '200':
+        description: 成员活动度。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/roster.yaml#/components/schemas/MemberActivity
+            example:
+              by_club:
+                - club: acm_icpc
+                  status: active
+                  registered_at: '2024-03-01'
+                  last_active_at: '2024-05-06T07:08:09.123Z'
+                  active_days: 21
+                  submissions: 84
+              last_active_at: '2024-05-06T07:08:09.123Z'
+              last_login_at: '2024-05-06T07:00:00.000Z'
+              last_api_use_at: '2024-05-06T07:08:09.123Z'
+              last_oj_activity_at: '2024-05-05T18:20:00.000Z'
+              activity_state: active
+              active_days_30d: 21
+              solved_count_30d: 37
+              submissions_30d: 84
+              computed_at: '2024-05-06T07:10:00.000Z'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT15M
+    x-cacheable: true

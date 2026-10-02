@@ -1,0 +1,1441 @@
+components:
+  schemas:
+    # ------------------------------------------------------------- 公告状态机
+    AnnouncementStatus:
+      type: string
+      description: |
+        新闻板公告的状态机取值。合法迁移（其余迁移一律 `409 conflict`）：
+
+        - `draft → scheduled`：起草中的公告在发布时带了**未来**的 `publish_at`；
+        - `scheduled → published`：到达 `publish_at` 时由服务器自动发布，并发出
+          `announcement.published` SSE 事件；
+        - `draft | scheduled | published → archived`：删除端点的**默认**行为（归档），
+          归档不可逆；
+        - `published → expired`：`expires_at` 到点后由服务器自动置为过期；
+        - `published | scheduled → draft`：撤销发布（`/unpublish`）。
+
+        `archived` 与 `expired` 为终态，不会自动回到其它状态；只有物理删除
+        （`DELETE ...?purge=true`）能把它们真正移除。
+      enum:
+        - draft
+        - scheduled
+        - published
+        - expired
+        - archived
+      examples:
+        - published
+
+    AnnouncementPriority:
+      type: string
+      description: |
+        公告优先级，用于新闻板排序、`sort=priority` 与广播模板中的提醒强度。
+        排序权重为 `low < normal < high < urgent`；本字段不影响投递顺序。
+      enum:
+        - low
+        - normal
+        - high
+        - urgent
+      default: normal
+      examples:
+        - normal
+
+    # ------------------------------------------------------------- 来源与去重
+    AnnouncementSource:
+      type: object
+      description: |
+        公告来源信息，用于追溯"谁把这条信息推进来的"。`kind` 取值如下：`manual` 人工录入、
+        `agent` Agent 生成、`group_chat` 从群聊抽取、`api` 外部系统直推、
+        `import` 历史数据导入。
+
+        本对象在公告上**只读**：创建时可提交，之后不可修改。
+        `kind=group_chat` 时通常同时提供 `group_name`、`message_id` 与
+        `confidence` 是抽取置信度，取值 0..1；服务端不设阈值门槛，低置信度也可入库。其余字段：
+        `raw_text` 保留原始文本以便人工核对。**本接口不做审核队列**：推送即入库，
+        是否发布由 `publish` 决定。
+      required:
+        - kind
+      properties:
+        kind:
+          type: string
+          description: 来源类型。
+          enum:
+            - manual
+            - agent
+            - group_chat
+            - api
+            - import
+          examples:
+            - group_chat
+        platform:
+          type: string
+          description: 来源平台标识，如 `qq`、`telegram`、`discord`。
+          maxLength: 32
+          examples:
+            - qq
+        url:
+          type: string
+          description: 原始消息/网页的可访问地址（供人工回看）。
+          format: uri
+          examples:
+            - https://qm.qq.com/cgi-bin/qm/qr?k=example
+        author:
+          type: string
+          description: 原始作者/发送者的展示名（不要求是系统主体）。
+          maxLength: 80
+          examples:
+            - 李四
+        group_name:
+          type: string
+          description: 群名称；`kind=group_chat` 时使用。
+          maxLength: 120
+          examples:
+            - DMU-ICPC-2024
+        message_id:
+          type: string
+          description: 平台侧消息 id，用于回溯与人工去重。
+          maxLength: 128
+          examples:
+            - '884210'
+        raw_text:
+          type:
+            - string
+            - 'null'
+          description: 抽取前的原始文本；未保留时为 `null`。
+          maxLength: 4000
+          examples:
+            - 本周六 14:00 在 A301 进行模拟赛，请自带电脑。
+        collected_at:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/Timestamp
+            - type: 'null'
+          description: 外部 Agent 采集到该信息的时刻；未知时为 `null`。
+        confidence:
+          type:
+            - number
+            - 'null'
+          minimum: 0
+          maximum: 1
+          description: 自动抽取的置信度（0..1）；人工录入与未知时为 `null`。
+          examples:
+            - 0.82
+      examples:
+        - kind: group_chat
+          platform: qq
+          url: https://qm.qq.com/cgi-bin/qm/qr?k=example
+          author: 李四
+          group_name: DMU-ICPC-2024
+          message_id: '884210'
+          raw_text: 本周六 14:00 在 A301 进行模拟赛，请自带电脑。
+          collected_at: '2024-05-06T07:00:00.000Z'
+          confidence: 0.82
+
+    # ------------------------------------------------------------------ 公告
+    Announcement:
+      type: object
+      description: |
+        新闻板公告（通知）资源。
+
+        `body_markdown` 为 Markdown 正文；`status` 的状态机见 `AnnouncementStatus`。
+        已发布公告的正文可以被修改（会提升 `revision` 并发出 `announcement.updated`
+        SSE 事件），因此"已发布"不等于不可变。
+
+        `dedup_key` 是**推送方自带**的去重键：同一 `dedup_key` 在 7 天窗口内重复推送
+        不会创建新公告，详见 `CreateAnnouncementRequest`。`broadcast_channel_ids`
+        是广播目标快照，`delivery_summary` 给出投递进度汇总（异步更新）。
+      required:
+        - id
+        - title
+        - body_markdown
+        - category
+        - tags
+        - priority
+        - pinned
+        - status
+        - visibility
+        - created_at
+        - updated_at
+        - revision
+      properties:
+        id:
+          $ref: ./common.yaml#/components/schemas/Id
+        title:
+          type: string
+          description: 标题，展示在新闻板列表首行。
+          minLength: 1
+          maxLength: 200
+          examples:
+            - 2024 暑期集训安排
+        body_markdown:
+          type: string
+          description: Markdown 正文；支持代码块与链接，服务端会做安全过滤。
+          minLength: 1
+          maxLength: 20000
+          examples:
+            - '## 时间：7 月 8 日起每周一、三、五 14:00 在 A301 训练。'
+        category:
+          type: string
+          description: 分类，自由文本但建议取自约定集合，例如 `training`、`contest`、`notice`。
+          minLength: 1
+          maxLength: 40
+          examples:
+            - training
+        tags:
+          type: array
+          description: 标签列表，用于过滤与展示；服务端会去重。
+          uniqueItems: true
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 40
+          examples:
+            - - 训练
+              - 通知
+        priority:
+          $ref: '#/components/schemas/AnnouncementPriority'
+        pinned:
+          type: boolean
+          description: |
+            是否置顶。置顶公告在新闻板列表最前；置顶总数上限由服务器配置
+            `announcements.max_pinned` 控制。
+          examples:
+            - true
+        status:
+          $ref: '#/components/schemas/AnnouncementStatus'
+        visibility:
+          $ref: ./common.yaml#/components/schemas/Visibility
+        publish_at:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/Timestamp
+            - type: 'null'
+          description: |
+            计划发布时刻；`status=scheduled` 时必有值，其它状态可为 `null`。
+            设为未来时刻即为"定时发布"。
+        published_at:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/Timestamp
+            - type: 'null'
+          description: 实际变为 `published` 的时刻；未发布时为 `null`。
+        expires_at:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/Timestamp
+            - type: 'null'
+          description: 过期时刻；到点后服务器自动把 `published` 置为 `expired`。
+        archived_at:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/Timestamp
+            - type: 'null'
+          description: 归档时刻；未归档时为 `null`。
+        source:
+          oneOf:
+            - $ref: '#/components/schemas/AnnouncementSource'
+            - type: 'null'
+          description: 来源信息；人工在面板创建且未填写时为 `null`。
+        dedup_key:
+          type:
+            - string
+            - 'null'
+          description: 推送方自带的去重键；未提供时为 `null`。
+          maxLength: 128
+          examples:
+            - qq-group-884210
+        broadcast_on_publish:
+          type: boolean
+          description: |
+            发布时是否自动广播到 `broadcast_channel_ids`。为 `false` 时发布只影响
+            新闻板，不产生投递记录。
+        broadcast_channel_ids:
+          type: array
+          description: 广播目标渠道 id 列表（创建/更新时由 `channel_ids` 写入的快照）。
+          maxItems: 50
+          items:
+            $ref: ./common.yaml#/components/schemas/Id
+          examples:
+            - - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+        author:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/PrincipalRef
+            - type: 'null'
+          description: |
+            公告署名作者，可不同于创建者，例如代某位教练发布时填教练；
+            未署名时为 `null`。
+        created_by:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/PrincipalRef
+            - type: 'null'
+          description: |
+            创建该公告的主体；外部 Agent / QQ 机器人推送时为对应的 `service` 主体。
+        delivery_summary:
+          oneOf:
+            - type: object
+              description: 广播投递进度汇总；异步更新，未广播时为全 0。
+              required:
+                - pending
+                - sent
+                - failed
+              properties:
+                pending:
+                  type: integer
+                  minimum: 0
+                  description: 等待投递或等待重试的条数。
+                sent:
+                  type: integer
+                  minimum: 0
+                  description: 已成功投递的条数。
+                failed:
+                  type: integer
+                  minimum: 0
+                  description: 重试耗尽后最终失败的条数。
+              examples:
+                - pending: 0
+                  sent: 2
+                  failed: 1
+            - type: 'null'
+          description: |
+            投递汇总；从未广播过的公告为 `null`。字段为异步更新的近似值，
+            精确逐条状态见 `GET /announcements/{announcement_id}/deliveries`。
+        created_at:
+          $ref: ./common.yaml#/components/schemas/Timestamp
+        updated_at:
+          $ref: ./common.yaml#/components/schemas/Timestamp
+        revision:
+          type: string
+          description: 版本标记，与 `ETag` 值一致；写入时可用 `If-Match` 做乐观并发控制。
+          examples:
+            - '3'
+      examples:
+        - id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          title: 2024 暑期集训安排
+          body_markdown: '## 时间：7 月 8 日起每周一、三、五 14:00 在 A301 训练。'
+          category: training
+          tags:
+            - 训练
+            - 通知
+          priority: normal
+          pinned: true
+          status: published
+          visibility: members
+          publish_at: null
+          published_at: '2024-05-06T07:08:09.123Z'
+          expires_at: null
+          archived_at: null
+          source:
+            kind: manual
+          dedup_key: null
+          broadcast_on_publish: true
+          broadcast_channel_ids:
+            - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          author: null
+          created_by:
+            id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            username: alice
+            display_name: 张三
+            kind: human
+          delivery_summary:
+            pending: 0
+            sent: 2
+            failed: 1
+          created_at: '2024-05-06T07:00:00.000Z'
+          updated_at: '2024-05-06T07:08:09.123Z'
+          revision: '3'
+
+    # -------------------------------------------------------------- 请求体
+    CreateAnnouncementRequest:
+      type: object
+      description: |
+        创建公告。**这是外部 Agent / QQ 机器人主动推送的入口**：推送即入库，
+        没有审核队列；是否对外可见由 `publish` 与 `publish_at` 决定。
+
+        权限语义：
+
+        - `publish=false`，默认只需 `announcement:write`，公告以 `draft` 落库；
+        - `publish=true` 需要 `announcement:publish`，否则 `403 insufficient_scope`
+          ，不会静默降级为草稿；
+        - `publish=true` 且 `broadcast=true` 时还需 `channel:manage`，否则同样
+          `403 insufficient_scope`。
+
+        时序与去重：
+
+        - `publish=true` 且 `publish_at` 为空或已过去 → 状态直接为 `published`，
+          立即发 `announcement.published` SSE 事件；
+        - `publish=true` 且 `publish_at` 为未来时刻 → 状态为 `scheduled`，到点由
+          服务器发布；`publish_at` 不能早于创建时刻。
+        - `dedup_key` 在 **7 天**窗口内重复出现时，不创建新资源，返回 **200** 与
+          已存在的公告（201 表示本次确实新建）；命中去重时不重复广播。
+        - `broadcast=true` 时广播被排成异步任务，`delivery_summary` 反映进度。
+      required:
+        - title
+        - body_markdown
+        - category
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: 标题。
+          examples:
+            - 2024 暑期集训安排
+        body_markdown:
+          type: string
+          minLength: 1
+          maxLength: 20000
+          description: Markdown 正文。
+          examples:
+            - '## 时间：7 月 8 日起每周一、三、五 14:00 在 A301 训练。'
+        category:
+          type: string
+          minLength: 1
+          maxLength: 40
+          description: 分类，例如 `training`、`contest`、`notice`。
+          examples:
+            - training
+        tags:
+          type: array
+          description: 标签列表；省略时为空列表。
+          uniqueItems: true
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 40
+          examples:
+            - - 训练
+              - 通知
+        priority:
+          $ref: '#/components/schemas/AnnouncementPriority'
+        pinned:
+          type: boolean
+          default: false
+          description: 是否置顶；超过 `announcements.max_pinned` 上限时返回 `409 conflict`。
+        visibility:
+          $ref: ./common.yaml#/components/schemas/Visibility
+        publish:
+          type: boolean
+          default: false
+          description: |
+            是否立即（或按 `publish_at` 定时）发布。为 `true` 时必须具备
+            `announcement:publish`，否则 `403 insufficient_scope`。
+        publish_at:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/Timestamp
+            - type: 'null'
+          description: |
+            计划发布时刻（UTC RFC 3339）。仅当 `publish=true` 时有意义：为未来时刻
+            则状态为 `scheduled`；早于当前时刻或省略时立即发布。
+        expires_at:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/Timestamp
+            - type: 'null'
+          description: 过期时刻；到点后由服务器自动把 `published` 置为 `expired`。
+        broadcast:
+          type: boolean
+          default: false
+          description: |
+            发布后是否广播到 `channel_ids`。需要 `channel:manage`；
+            `publish=false` 时该字段被忽略（不产生投递）。
+        channel_ids:
+          type: array
+          description: 广播目标渠道 id 列表；省略时沿用公告已有的目标（首次创建时为空）。
+          maxItems: 50
+          items:
+            $ref: ./common.yaml#/components/schemas/Id
+          examples:
+            - - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+        dedup_key:
+          type:
+            - string
+            - 'null'
+          description: |
+            推送方自带的去重键（8..128 字符）。同一键在 7 天内重复推送会命中已有公告，
+            此时返回 `200` 而不是 `201`。
+          minLength: 8
+          maxLength: 128
+          examples:
+            - qq-group-884210
+        source:
+          oneOf:
+            - $ref: '#/components/schemas/AnnouncementSource'
+            - type: 'null'
+          description: 来源信息；外部 Agent / 群聊机器人推送时应填写，便于追溯。
+      examples:
+        - title: 2024 暑期集训安排
+          body_markdown: '## 时间：7 月 8 日起每周一、三、五 14:00 在 A301 训练。'
+          category: training
+          tags:
+            - 训练
+          priority: normal
+          pinned: false
+          visibility: members
+          publish: true
+          publish_at: '2024-05-07T00:00:00.000Z'
+          expires_at: null
+          broadcast: true
+          channel_ids:
+            - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          dedup_key: qq-group-884210
+          source:
+            kind: group_chat
+            platform: qq
+            group_name: DMU-ICPC-2024
+            message_id: '884210'
+            confidence: 0.82
+
+    UpdateAnnouncementRequest:
+      type: object
+      description: |
+        局部更新公告（缺省字段不变）。**不含 `publish`、`source`、`dedup_key`**：
+        发布状态走 `/publish` 与 `/unpublish`，来源与去重键创建后不可改。
+
+        - 只提供要改的字段；`null` 表示清空该字段（`publish_at`/`expires_at`）。
+        - 正文修改对**已发布**公告同样允许：会提升 `revision` 并向 SSE 推送
+          `announcement.updated` 事件，订阅方应据此刷新本地副本。
+        - 已发布公告不允许再改 `publish_at`（返回 `409 conflict`）。
+        - `pinned=true` 时置顶总数不得超过 `announcements.max_pinned`。
+      minProperties: 1
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: 标题。
+          examples:
+            - 2024 暑期集训安排（更新）
+        body_markdown:
+          type: string
+          minLength: 1
+          maxLength: 20000
+          description: Markdown 正文。
+          examples:
+            - '## 时间：改为 7 月 9 日起每周二、四 14:00 在 A301 训练。'
+        category:
+          type: string
+          minLength: 1
+          maxLength: 40
+          description: 分类。
+          examples:
+            - training
+        tags:
+          type: array
+          description: 标签列表；提供时整体替换。
+          uniqueItems: true
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 40
+          examples:
+            - - 训练
+              - 通知
+        priority:
+          $ref: '#/components/schemas/AnnouncementPriority'
+        pinned:
+          type: boolean
+          description: 是否置顶；置顶数量上限见 `announcements.max_pinned`。
+        visibility:
+          $ref: ./common.yaml#/components/schemas/Visibility
+        publish_at:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/Timestamp
+            - type: 'null'
+          description: |
+            计划发布时刻；仅 `draft`/`scheduled` 可改，`published` 公告改此字段返回
+            `409 conflict`。`null` 表示取消定时（`scheduled → draft`）。
+        expires_at:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/Timestamp
+            - type: 'null'
+          description: 过期时刻；`null` 表示清除过期时间。
+        broadcast:
+          type: boolean
+          description: |
+            是否在下次发布时广播（写入 `broadcast_on_publish`）；需要 `channel:manage`。
+        channel_ids:
+          type: array
+          description: 广播目标渠道 id 列表；提供时整体替换。
+          maxItems: 50
+          items:
+            $ref: ./common.yaml#/components/schemas/Id
+          examples:
+            - - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      examples:
+        - body_markdown: '## 时间：改为 7 月 9 日起每周二、四 14:00 在 A301 训练。'
+          tags:
+            - 训练
+          pinned: true
+
+    PublishAnnouncementRequest:
+      type: object
+      description: |
+        发布公告的选项。`draft`/`scheduled` → `published`，并带未来 `publish_at` 时为
+        `scheduled`；已发布公告重复调用是幂等的（状态不变，`publish_at` 不可再改）。
+      properties:
+        publish_at:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/Timestamp
+            - type: 'null'
+          description: |
+            计划发布时刻；为未来时刻则状态为 `scheduled`，到点由服务器自动发布并发出
+            `announcement.published` SSE 事件。省略或 `null` 表示立即发布。
+        broadcast:
+          type: boolean
+          default: false
+          description: 发布后是否立即广播；需要 `channel:manage`。
+        channel_ids:
+          type: array
+          description: 本次广播的目标渠道；省略时使用公告已保存的目标列表。
+          maxItems: 50
+          items:
+            $ref: ./common.yaml#/components/schemas/Id
+          examples:
+            - - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      examples:
+        - publish_at: '2024-05-07T00:00:00.000Z'
+          broadcast: true
+          channel_ids:
+            - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+
+    PinAnnouncementRequest:
+      type: object
+      description: |
+        设置或取消置顶。置顶公告在新闻板列表最前；置顶总量上限由服务器配置
+        `announcements.max_pinned` 控制，超过时返回 `409 conflict`（不会挤掉已有置顶）。
+      required:
+        - pinned
+      properties:
+        pinned:
+          type: boolean
+          description: '`true` 置顶，`false` 取消置顶。重复设置同一值是幂等的。'
+          examples:
+            - true
+      examples:
+        - pinned: true
+
+    BroadcastAnnouncementRequest:
+      type: object
+      description: |
+        手动触发一次广播（异步任务）。可选在 `test=true` 时只投递到测试渠道，
+        用于验证模板与连通性而不打扰真实群。
+      properties:
+        channel_ids:
+          type: array
+          description: 目标渠道 id 列表；省略时使用公告已保存的目标列表。
+          maxItems: 50
+          items:
+            $ref: ./common.yaml#/components/schemas/Id
+          examples:
+            - - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+        test:
+          type: boolean
+          default: false
+          description: |
+            为 `true` 时只投递到处于 `test` 模式的渠道，且**不改变公告状态**、
+            不计入正式投递统计。
+      examples:
+        - channel_ids:
+            - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          test: false
+
+    PagedAnnouncement:
+      description: 公告的偏移分页结果。
+      allOf:
+        - $ref: ./common.yaml#/components/schemas/PageMeta
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页公告，按 `sort`/`order` 排列。
+              items:
+                $ref: '#/components/schemas/Announcement'
+      examples:
+        - page: 1
+          size: 20
+          total: 1
+          has_next: false
+          items:
+            - id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              title: 2024 暑期集训安排
+              body_markdown: '## 时间：7 月 8 日起每周一、三、五 14:00 在 A301 训练。'
+              category: training
+              tags:
+                - 训练
+              priority: normal
+              pinned: true
+              status: published
+              visibility: members
+              publish_at: null
+              published_at: '2024-05-06T07:08:09.123Z'
+              expires_at: null
+              archived_at: null
+              source:
+                kind: manual
+              dedup_key: null
+              broadcast_on_publish: true
+              broadcast_channel_ids:
+                - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              author: null
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              delivery_summary:
+                pending: 0
+                sent: 2
+                failed: 1
+              created_at: '2024-05-06T07:00:00.000Z'
+              updated_at: '2024-05-06T07:08:09.123Z'
+              revision: '3'
+
+    # ------------------------------------------------------------------ 渠道
+    ChannelKind:
+      type: string
+      description: |
+        广播渠道类型。类型创建后不可更改，取值如下：`qq_group` QQ 群、
+        `qq_private` QQ 私聊、`webhook` 通用 Webhook、`discord_webhook` Discord Webhook、
+        `telegram` Telegram。
+      enum:
+        - qq_group
+        - qq_private
+        - webhook
+        - discord_webhook
+        - telegram
+      examples:
+        - qq_group
+
+    Channel:
+      type: object
+      description: |
+        广播渠道资源。
+
+        **敏感字段不回显**：`target`（Webhook URL / 群号）与 `secret` 只在
+        `CreateChannelRequest` / `UpdateChannelRequest` 中出现；任何读取响应一律只返回
+        `target_masked`（脱敏目标）与 `secret_set`（是否已配置密钥）。
+        因此渠道列表也需要 `channel:manage` 权限。
+
+        `rate_limit_per_minute` 限制该渠道的投递速率，超出部分排队而非失败；
+        `visibility_filter` 决定哪些可见性的公告可以投递到该渠道。
+      required:
+        - id
+        - name
+        - kind
+        - enabled
+        - target_masked
+        - created_at
+        - updated_at
+        - revision
+      properties:
+        id:
+          $ref: ./common.yaml#/components/schemas/Id
+        name:
+          type: string
+          description: 渠道名，人类可读且在全体渠道内唯一。
+          minLength: 1
+          maxLength: 80
+          examples:
+            - 2024 级训练群
+        kind:
+          $ref: '#/components/schemas/ChannelKind'
+        target_masked:
+          type: string
+          description: |
+            脱敏后的投递目标：Webhook 形如 `https://qyapi.weixin.qq.com/***abcd`，
+            群聊目标保留后 4 位，例如 `****1234`。**永远不回显完整 target**。
+          examples:
+            - '****1234'
+        secret_set:
+          type: boolean
+          description: 是否已配置签名密钥（`secret`）；密钥明文永不回显。
+        enabled:
+          type: boolean
+          description: 是否启用；`false` 时广播会跳过该渠道（投递状态为 `skipped`）。
+        template:
+          type:
+            - string
+            - 'null'
+          description: |
+            可选的消息模板，例如 `【公告】{{title}}`，支持 `{{id}}`、`{{title}}`、
+            `{{url}}` 等占位符；为 `null` 时使用服务器默认模板。
+          maxLength: 1000
+          examples:
+            - 【公告 #{{id}}】{{title}}
+        mention_all:
+          type: boolean
+          description: 投递时是否 @全体成员；仅部分渠道类型支持，默认 `false`。
+        rate_limit_per_minute:
+          type: integer
+          minimum: 1
+          maximum: 600
+          default: 30
+          description: 该渠道每分钟最多投递的消息条数；超出时排队等待下一时间窗。
+          examples:
+            - 30
+        visibility_filter:
+          type: string
+          description: |
+            可见性过滤：`public` 只投递 `visibility=public` 的公告，`members` 投递
+            `public` 与 `members`，`all` 投递全部，含 `private`，谨慎使用。
+          enum:
+            - public
+            - members
+            - all
+          default: all
+          examples:
+            - members
+        created_by:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/PrincipalRef
+            - type: 'null'
+          description: 创建该渠道的主体。
+        last_delivery_at:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/Timestamp
+            - type: 'null'
+          description: 最近一次成功投递的时刻；从未成功投递时为 `null`。
+        last_error:
+          type:
+            - string
+            - 'null'
+          description: 最近一次投递失败的简短原因（供排障，不保证稳定）；成功或无记录时为 `null`。
+          maxLength: 500
+          examples:
+            - 'HTTP 429 from upstream: rate limited'
+        created_at:
+          $ref: ./common.yaml#/components/schemas/Timestamp
+        updated_at:
+          $ref: ./common.yaml#/components/schemas/Timestamp
+        revision:
+          type: string
+          description: 版本标记，与 `ETag` 值一致。
+          examples:
+            - '2'
+      examples:
+        - id: chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          name: 2024 级训练群
+          kind: qq_group
+          target_masked: '****1234'
+          secret_set: true
+          enabled: true
+          template: 【公告 #{{id}}】{{title}}
+          mention_all: false
+          rate_limit_per_minute: 30
+          visibility_filter: members
+          created_by:
+            id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            username: alice
+            display_name: 张三
+            kind: human
+          last_delivery_at: '2024-05-06T07:08:10.000Z'
+          last_error: null
+          created_at: '2024-05-01T02:00:00.000Z'
+          updated_at: '2024-05-06T07:00:00.000Z'
+          revision: '2'
+
+    CreateChannelRequest:
+      type: object
+      description: |
+        创建广播渠道。`target` 与 `secret` 是**敏感字段，只在写入时提交**：
+        读取响应只返回 `target_masked` 与 `secret_set`。
+        同一 `name` 已存在时返回 `409 conflict`。
+      required:
+        - name
+        - kind
+        - target
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: 渠道名，全局唯一。
+          examples:
+            - 2024 级训练群
+        kind:
+          $ref: '#/components/schemas/ChannelKind'
+        target:
+          type: string
+          writeOnly: true
+          minLength: 1
+          maxLength: 1000
+          description: |
+            投递目标明文：Webhook URL 或群号（依 `kind` 而定）。
+            **只在写入时提交，之后任何接口都不回显**；如需更换请再次提交。
+        secret:
+          type: string
+          format: password
+          writeOnly: true
+          maxLength: 256
+          description: |
+            可选签名密钥。配置后，每次投递都会在 `X-Xcpc-Signature` 请求头带上
+            `sha256=<hex>`，即用该密钥对**请求体原文**做 HMAC-SHA256 的结果，接收方可据此
+            验签。**只在写入时提交**，读取只回 `secret_set`。
+        enabled:
+          type: boolean
+          default: true
+          description: 是否启用。
+        template:
+          type:
+            - string
+            - 'null'
+          maxLength: 1000
+          description: 可选消息模板；支持 `{{id}}`、`{{title}}`、`{{url}}` 占位符。
+        mention_all:
+          type: boolean
+          default: false
+          description: 投递时是否 @全体成员。
+        rate_limit_per_minute:
+          type: integer
+          minimum: 1
+          maximum: 600
+          default: 30
+          description: 每分钟投递上限。
+        visibility_filter:
+          type: string
+          enum:
+            - public
+            - members
+            - all
+          default: all
+          description: 可见性过滤（`public` < `members` < `all`）。
+      examples:
+        - name: 2024 级训练群
+          kind: qq_group
+          target: '1234567890'
+          secret: webhook-signing-secret
+          enabled: true
+          template: 【公告 #{{id}}】{{title}}
+          mention_all: false
+          rate_limit_per_minute: 30
+          visibility_filter: members
+
+    UpdateChannelRequest:
+      type: object
+      description: |
+        局部更新渠道（缺省字段不变）。`target`/`secret` 提供时**整体替换**旧值；
+        `null` 表示清除密钥或恢复默认模板。修改立即对后续投递生效，
+        已在重试队列中的投递沿用发起时的目标快照。
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: 渠道名；与其它渠道重名返回 `409 conflict`。
+          examples:
+            - 2024 级训练群（新）
+        target:
+          type: string
+          writeOnly: true
+          minLength: 1
+          maxLength: 1000
+          description: 新的投递目标明文（整体替换）；不回显。
+        secret:
+          type:
+            - string
+            - 'null'
+          format: password
+          writeOnly: true
+          maxLength: 256
+          description: 新的签名密钥；`null` 表示清除（`secret_set` 变为 `false`）。
+        enabled:
+          type: boolean
+          description: 是否启用。
+        template:
+          type:
+            - string
+            - 'null'
+          maxLength: 1000
+          description: 消息模板；`null` 恢复默认模板。
+        mention_all:
+          type: boolean
+          description: 是否 @全体成员。
+        rate_limit_per_minute:
+          type: integer
+          minimum: 1
+          maximum: 600
+          description: 每分钟投递上限。
+        visibility_filter:
+          type: string
+          enum:
+            - public
+            - members
+            - all
+          description: 可见性过滤。
+      examples:
+        - enabled: false
+          rate_limit_per_minute: 10
+
+    ChannelRef:
+      type: object
+      description: |
+        渠道的轻量引用（投递记录中的**快照**）：渠道被删除或改名后，
+        历史投递记录仍保留当时的 `name` 与 `kind`。
+      required:
+        - id
+        - name
+        - kind
+      properties:
+        id:
+          $ref: ./common.yaml#/components/schemas/Id
+        name:
+          type: string
+          description: 渠道名快照。
+          examples:
+            - 2024 级训练群
+        kind:
+          $ref: '#/components/schemas/ChannelKind'
+      examples:
+        - id: chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          name: 2024 级训练群
+          kind: qq_group
+
+    TestChannelRequest:
+      type: object
+      description: |
+        渠道连通性测试的可选参数。测试会真实向该渠道投递一条消息，
+        用于验证目标与密钥是否有效。
+      properties:
+        message:
+          type: string
+          maxLength: 500
+          default: 这是一条来自 DMU/ICPC 面板的渠道连通性测试消息。
+          description: 自定义测试文案；省略时使用默认测试文案。
+          examples:
+            - 面板渠道测试，请忽略。
+      examples:
+        - message: 面板渠道测试，请忽略。
+
+    ChannelTestResult:
+      type: object
+      description: |
+        测试结果。**投递失败不是 HTTP 错误**：只要请求本身合法，无论上游是否接收成功
+        都返回 `200`，由 `ok` 与 `error` 表达结果；只有认证、权限或参数问题才是 4xx。
+      required:
+        - ok
+        - latency_ms
+      properties:
+        ok:
+          type: boolean
+          description: 上游是否接受了该条消息。
+        latency_ms:
+          type:
+            - integer
+            - 'null'
+          minimum: 0
+          description: 端到端耗时（毫秒）；未发出请求，例如渠道被禁用时为 `null`。
+          examples:
+            - 182
+        status_code:
+          type:
+            - integer
+            - 'null'
+          minimum: 100
+          maximum: 599
+          description: 上游返回的 HTTP 状态码；不适用时为 `null`。
+          examples:
+            - 200
+        error:
+          type:
+            - string
+            - 'null'
+          description: 失败原因摘要；`ok=true` 时为 `null`。
+          maxLength: 500
+          examples:
+            - 'connect timeout after 5000ms'
+        sent_at:
+          $ref: ./common.yaml#/components/schemas/Timestamp
+      examples:
+        - ok: true
+          latency_ms: 182
+          status_code: 200
+          error: null
+          sent_at: '2024-05-06T07:08:09.123Z'
+
+    PagedChannel:
+      description: 渠道的偏移分页结果。
+      allOf:
+        - $ref: ./common.yaml#/components/schemas/PageMeta
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页渠道，不含 target/secret 明文。
+              items:
+                $ref: '#/components/schemas/Channel'
+      examples:
+        - page: 1
+          size: 20
+          total: 1
+          has_next: false
+          items:
+            - id: chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              name: 2024 级训练群
+              kind: qq_group
+              target_masked: '****1234'
+              secret_set: false
+              enabled: true
+              template: null
+              mention_all: false
+              rate_limit_per_minute: 30
+              visibility_filter: all
+              created_by: null
+              last_delivery_at: null
+              last_error: null
+              created_at: '2024-05-01T02:00:00.000Z'
+              updated_at: '2024-05-01T02:00:00.000Z'
+              revision: '1'
+
+    # ------------------------------------------------------------------ 投递
+    DeliveryState:
+      type: string
+      description: |
+        单条投递的状态机：
+
+        - `pending → sending → sent`（成功）或 `pending → sending → failed`；
+        - `failed` 后按指数退避重试（更新 `attempts` 与 `next_attempt_at`），
+          再次进入 `sending`；重试次数耗尽后停留在 `failed`；
+        - `skipped`：渠道被禁用或 `visibility_filter` 不匹配，未尝试投递（终态）。
+      enum:
+        - pending
+        - sending
+        - sent
+        - failed
+        - skipped
+      examples:
+        - sent
+
+    Delivery:
+      type: object
+      description: |
+        一条"公告 × 渠道"的投递记录。投递是**至少一次（at-least-once）**语义：
+        `failed` 后按 `next_attempt_at` 退避重试，同一条记录可能对渠道产生重复消息，
+        因此渠道模板中带有公告 id，接收方可据此去重。
+
+        `channel` 是发起投递时的渠道快照（渠道删除后记录仍完整）。
+      required:
+        - id
+        - announcement_id
+        - channel
+        - state
+        - attempts
+        - created_at
+      properties:
+        id:
+          $ref: ./common.yaml#/components/schemas/Id
+        announcement_id:
+          $ref: ./common.yaml#/components/schemas/Id
+        channel:
+          $ref: '#/components/schemas/ChannelRef'
+        state:
+          $ref: '#/components/schemas/DeliveryState'
+        attempts:
+          type: integer
+          minimum: 0
+          description: 已尝试投递的次数，含正在进行的一次；首次投递前为 0。
+          examples:
+            - 2
+        last_attempt_at:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/Timestamp
+            - type: 'null'
+          description: 最近一次尝试投递的时刻；从未尝试时为 `null`。
+        sent_at:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/Timestamp
+            - type: 'null'
+          description: 成功投递的时刻；未成功时为 `null`。
+        error:
+          type:
+            - string
+            - 'null'
+          description: 最近一次失败原因摘要；无失败时为 `null`。
+          maxLength: 500
+          examples:
+            - 'HTTP 500 from upstream'
+        external_message_id:
+          type:
+            - string
+            - 'null'
+          description: 渠道侧返回的消息 id，便于人工在群里定位；不可用时为 `null`。
+          maxLength: 128
+          examples:
+            - qq_msg_884210
+        next_attempt_at:
+          oneOf:
+            - $ref: ./common.yaml#/components/schemas/Timestamp
+            - type: 'null'
+          description: |
+            下一次重试时刻；`state` 为 `failed` 且仍会重试时存在，
+            终态或成功时为 `null`。
+        created_at:
+          $ref: ./common.yaml#/components/schemas/Timestamp
+      examples:
+        - id: dlv_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          announcement_id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          channel:
+            id: chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            name: 2024 级训练群
+            kind: qq_group
+          state: failed
+          attempts: 2
+          last_attempt_at: '2024-05-06T07:09:00.000Z'
+          sent_at: null
+          error: 'HTTP 500 from upstream'
+          external_message_id: null
+          next_attempt_at: '2024-05-06T07:11:00.000Z'
+          created_at: '2024-05-06T07:08:09.123Z'
+
+    PagedDelivery:
+      description: 投递记录的偏移分页结果。
+      allOf:
+        - $ref: ./common.yaml#/components/schemas/PageMeta
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页投递记录。
+              items:
+                $ref: '#/components/schemas/Delivery'
+      examples:
+        - page: 1
+          size: 20
+          total: 1
+          has_next: false
+          items:
+            - id: dlv_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              announcement_id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              channel:
+                id: chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                name: 2024 级训练群
+                kind: qq_group
+              state: sent
+              attempts: 1
+              last_attempt_at: '2024-05-06T07:08:10.000Z'
+              sent_at: '2024-05-06T07:08:10.000Z'
+              error: null
+              external_message_id: qq_msg_884210
+              next_attempt_at: null
+              created_at: '2024-05-06T07:08:09.123Z'
+
+    # ------------------------------------------------------------- SSE 事件流
+    StreamTopic:
+      type: string
+      description: |
+        SSE 订阅主题。每个主题对应一类资源事件，读取权限按 `资源:read` 校验：
+
+        - `announcements` → `announcement:read`（公告发布/更新/归档、投递失败）；
+        - `scoreboards` → `scoreboard:read`；
+        - `ingest` → `crawler:read`（采集进度属于采集器域；**本契约不设 `ingest:read`**）；
+        - `quotas` → `quota:read`；
+        - `members` → `member:read`；
+        - `jobs` → `ops:read`（异步任务状态变化）。
+      enum:
+        - announcements
+        - scoreboards
+        - ingest
+        - quotas
+        - members
+        - jobs
+      examples:
+        - announcements
+
+    StreamTokenRequest:
+      type: object
+      description: |
+        短时流令牌的签发参数。令牌用于浏览器 `EventSource`（无法设置请求头），
+        因此以查询参数 `access_token` 传递。
+      properties:
+        topics:
+          type: array
+          description: |
+            希望订阅的主题；省略时订阅该主体**有权读取的全部主题**。
+            请求超出自身 scope 的主题会在签发时被拒绝（`403 insufficient_scope`）。
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/StreamTopic'
+          examples:
+            - - announcements
+              - jobs
+        expires_in:
+          type: integer
+          minimum: 60
+          maximum: 600
+          default: 600
+          description: 令牌有效秒数（60..600，默认 600，即 10 分钟）。
+          examples:
+            - 600
+        last_event_id:
+          type:
+            - string
+            - 'null'
+          description: |
+            可选：连接时从该事件序号之后开始补发，等价于 `Last-Event-ID` 请求头。
+            省略时只推送连接之后产生的新事件。
+          maxLength: 64
+          examples:
+            - '1024'
+      examples:
+        - topics:
+            - announcements
+            - jobs
+          expires_in: 600
+          last_event_id: '1024'
+
+    StreamToken:
+      type: object
+      description: |
+        短时流令牌。**单次连接有效**：一次连接断开后该令牌即失效（无论是否到期），
+        客户端必须重新签发。令牌超过 `expires_at` 后服务器返回 `401` 并关闭连接，
+        浏览器 `EventSource` 因此停止自动重连，客户端需重新 `POST /stream/tokens`
+        再建立新连接。
+      required:
+        - token
+        - expires_at
+        - topics
+        - url
+      properties:
+        token:
+          type: string
+          description: 令牌明文，放入 `access_token` 查询参数；不要放进请求头。
+          minLength: 16
+          examples:
+            - st_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+        expires_at:
+          $ref: ./common.yaml#/components/schemas/Timestamp
+        topics:
+          type: array
+          description: 实际授予的主题（已按主体 scope 过滤/校验）。
+          items:
+            $ref: '#/components/schemas/StreamTopic'
+          examples:
+            - - announcements
+              - jobs
+        url:
+          type: string
+          description: |
+            相对 SSE 地址，已带好 `topics` 与 `access_token` 查询参数，
+            可直接交给 `new EventSource(url)`。
+          examples:
+            - /api/v1/stream/events?topics=announcements,jobs&access_token=st_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      examples:
+        - token: st_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          expires_at: '2024-05-06T07:18:09.123Z'
+          topics:
+            - announcements
+            - jobs
+          url: /api/v1/stream/events?topics=announcements,jobs&access_token=st_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+
+    StreamResourceKind:
+      type: string
+      description: |
+        事件指向的资源种类，取值是资源名的**单数**。客户端据此决定失效哪一份本地副本
+        （缓存条目的资源标签是集合名，映射关系在客户端的 `STREAM_KIND_TO_RESOURCES` 里，
+        契约测试会校验两者一一对应）。
+      enum:
+        - announcement
+        - channel
+        - delivery
+        - scoreboard
+        - member
+        - team
+        - quota
+        - job
+        - crawler_run
+        - oj_handle
+        - credential
+        - audit_log
+
+    StreamEvent:
+      type: object
+      description: |
+        SSE 事件负载。每个事件的 `data:` 行是该对象的单行 JSON。
+
+        `id` 是单调递增的十进制序号字符串，同时作为 SSE 的 `id:` 字段；客户端的
+        `Last-Event-ID` 与 `last_event_id` 都使用它。序号**全局唯一且单调递增**，
+        客户端发现跳号即表示丢事件，应视为 gap 并做一次全量刷新。由于编号发生在
+        `topics` 过滤之后，正常的主题过滤不会跳号。
+      required:
+        - id
+        - sequence
+        - topic
+        - type
+        - occurred_at
+        - data
+      properties:
+        id:
+          type: string
+          description: 事件序号（十进制字符串），与 `sequence` 数值相同，用作 SSE `id:`。
+          examples:
+            - '1024'
+        sequence:
+          type: integer
+          minimum: 1
+          description: |
+            事件序号的整数形式。它是**这条订阅流上实际交付的事件**的编号，从 1 开始逐条
+            +1；服务端先按令牌的 `topics` 过滤再编号，因此主题过滤不会造成跳号。
+            只有服务端来不及交付、缓冲被覆盖时才会跳号，此时先发 `stream.gap`。
+          examples:
+            - 1024
+        topic:
+          $ref: '#/components/schemas/StreamTopic'
+        type:
+          type: string
+          description: |
+            事件类型。公告类：`announcement.created`、`announcement.published`、
+            `announcement.updated`、`announcement.archived`、`delivery.failed`；
+            其它主题：`scoreboard.rebuilt`、`ingest.batch_accepted`、
+            `quota.claim_approved` 等；缓冲不足导致的重放缺口为 `stream.gap`。
+          examples:
+            - announcement.published
+        occurred_at:
+          $ref: ./common.yaml#/components/schemas/Timestamp
+        revision:
+          type:
+            - string
+            - 'null'
+          description: 事件对应资源的版本标记（与 `ETag` 一致）；不适用时为 `null`。
+          examples:
+            - '3'
+        resource:
+          oneOf:
+            - type: object
+              description: 事件对应的资源标识。
+              required:
+                - kind
+                - id
+              properties:
+                kind:
+                  $ref: '#/components/schemas/StreamResourceKind'
+                id:
+                  $ref: ./common.yaml#/components/schemas/Id
+              examples:
+                - kind: announcement
+                  id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            - type: 'null'
+          description: 事件对应资源；`stream.gap` 等无单一资源的事件为 `null`。
+        data:
+          type: object
+          additionalProperties: true
+          description: |
+            附加负载（形状由 `type` 决定，未知字段必须忽略）。例如
+            `stream.gap` 带 `resync_required: true` 与 `from_sequence`/`to_sequence`。
+          examples:
+            - resync_required: true
+              from_sequence: 1010
+              to_sequence: 1024
+      examples:
+        - id: '1024'
+          sequence: 1024
+          topic: announcements
+          type: announcement.published
+          occurred_at: '2024-05-06T07:08:09.123Z'
+          revision: '3'
+          resource:
+            kind: announcement
+            id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          data:
+            status: published

@@ -1,0 +1,135 @@
+components:
+  parameters:
+    Page:
+      name: page
+      in: query
+      required: false
+      description: 页码，从 1 开始；越界返回空 `items` 而非 404。
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+      example: 1
+
+    Size:
+      name: size
+      in: query
+      required: false
+      description: 每页条数；超过上限时取上限而不报错。
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 20
+      example: 20
+
+    Order:
+      name: order
+      in: query
+      required: false
+      description: 排序方向，默认按各端点说明。
+      schema:
+        $ref: '../schemas/common.yaml#/components/schemas/SortOrder'
+      example: desc
+
+    UpdatedSince:
+      name: updated_since
+      in: query
+      required: false
+      description: |
+        仅返回 `updated_at` **严格晚于**该时刻的资源，用于增量追赶；`delete` 不在列表里
+        （删除请用 `GET /sync/changes`）。
+
+        **推荐用法**：`sort=updated_at&order=asc`，并以**最后一条的 `updated_at` 原样**作为
+        下一次的 `updated_since`。顺序是 `(updated_at, id)` 决胜的稳定序，因此同刻多条不会
+        漏；但翻页期间被更新的资源可能再次出现，**按 `id` 去重即可**。资源被删除后本参数
+        不会再报告它，需要删除流就用 `GET /sync/changes`。该模式下不要依赖 `ETag`。
+      schema:
+        $ref: '../schemas/common.yaml#/components/schemas/Timestamp'
+      example: '2024-05-01T00:00:00.000Z'
+
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: 上一页返回的 `next_cursor`；首次请求留空。
+      schema:
+        type: string
+        maxLength: 512
+      example: eyJ0IjoiMjAyNC0wNS0wNlQwNzowODowOS4xMjNaIiwiaWQiOiJzdWJfMDFKOFo1VjZRMEszTTdOOVAyUjRUNlc4WDAifQ
+
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: 游标分页的单页条数上限。
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 50
+      example: 50
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        客户端生成的幂等键（建议 UUIDv4 或 ULID，8..128 字符）。
+        同一主体 + 同一端点 + 同一键在保留期，默认 24h内：
+        重复请求返回**首次**的响应，并带 `Idempotency-Replayed: true`；
+        若请求体不同则 `409 idempotency_key_reused`。
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+        pattern: '^[A-Za-z0-9_.:-]+$'
+      example: 6f1c2ab4-9f4e-4c1a-9f2b-1c2d3e4f5a6b
+
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: |
+        乐观并发控制：取该资源 `GET` 返回的 `ETag` 原值，含引号或 `W/` 前缀。
+        不匹配返回 `412 precondition_failed`；`If-Match: *` 表示"只要资源存在"。
+      schema:
+        type: string
+        maxLength: 128
+      example: '"17"'
+
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: |
+        条件读取：与当前 `ETag` 相同则返回 `304 Not Modified`（无响应体）。
+        离线缓存的读穿透路径依赖该机制。
+      schema:
+        type: string
+        maxLength: 128
+      example: '"17"'
+
+    DryRun:
+      name: dry_run
+      in: query
+      required: false
+      description: |
+        仅校验并返回将要发生的结果，不产生持久化副作用（不消耗名额、不发送广播、
+        不写审计）。响应形状与真实执行一致，但资源 id 为合成值。
+      schema:
+        type: boolean
+        default: false
+      example: false
+
+    AccessTokenQuery:
+      name: access_token
+      in: query
+      required: false
+      description: |
+        短时流令牌，仅用于 SSE。由 `POST /stream/tokens` 签发，≤10 分钟有效、
+        单次连接有效；与 `Authorization` 头互斥，二者同时出现时以头为准。
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 512

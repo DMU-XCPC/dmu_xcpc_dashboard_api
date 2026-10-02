@@ -1,0 +1,1691 @@
+quotas:
+  get:
+    tags:
+      - quotas
+    operationId: listQuotas
+    summary: 列出名额池
+    description: |
+      按条件检索名额池，默认按 `created_at` 降序。任何持有 `quota:read` 的主体
+      ，含机器人都可以查看；`draft` 状态的名额池对普通成员也可见，便于提前知晓安排。
+
+      **过滤**：`status` 按状态机取值；`season` 与 `kind` 过滤比赛属性；
+      `updated_since` 只返回 `updated_at` 严格晚于该时刻的名额池，
+      与 `sort=created_at&order=asc` 组合可用于增量追赶（此时 `ETag` 不适用）。
+
+      **一致性**：强一致。每个名额池的 `counts` 与其 `status` 来自同一事务视图。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Page
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Size
+      - $ref: ../components/parameters/common.yaml#/components/parameters/UpdatedSince
+      - name: status
+        in: query
+        required: false
+        description: 只返回指定状态的名额池；重复或未知取值返回 `400 bad_request`。
+        schema:
+          $ref: ../components/schemas/quotas.yaml#/components/schemas/QuotaStatus
+        example: open
+      - name: season
+        in: query
+        required: false
+        description: 只返回指定赛季（`YYYY-YYYY`）的名额池。
+        schema:
+          type: string
+          pattern: '^\d{4}-\d{4}$'
+        example: 2024-2025
+      - name: kind
+        in: query
+        required: false
+        description: 只返回指定竞赛类型的名额池。
+        schema:
+          $ref: ../components/schemas/quotas.yaml#/components/schemas/ContestKind
+        example: regional
+      - name: sort
+        in: query
+        required: false
+        description: |
+          排序键。`held_on` 以比赛举办日期排序，未设置举办日期的名额池排在最后。
+        schema:
+          type: string
+          enum:
+            - created_at
+            - held_on
+            - quota_total
+            - updated_at
+          default: created_at
+        example: created_at
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Order
+    responses:
+      '200':
+        description: 名额池分页列表。
+        headers:
+          X-RateLimit-Limit:
+            $ref: ../components/headers/common.yaml#/components/headers/RateLimitLimit
+          X-RateLimit-Remaining:
+            $ref: ../components/headers/common.yaml#/components/headers/RateLimitRemaining
+          X-RateLimit-Reset:
+            $ref: ../components/headers/common.yaml#/components/headers/RateLimitReset
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/PagedQuota
+            example:
+              page: 1
+              size: 20
+              total: 1
+              has_next: false
+              items:
+                - id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  title: 2024 南京站名额
+                  contest:
+                    name: 2024 ICPC 亚洲区域赛（南京）
+                    kind: regional
+                    season: 2024-2025
+                    external_id: icpc-2024-nanjing
+                    held_on: '2024-11-16'
+                    location: 南京
+                    url: https://icpc.example.edu/nanjing-2024
+                  quota_total: 6
+                  max_claims_per_team: 2
+                  status: open
+                  counts:
+                    claims_pending: 2
+                    claims_approved: 3
+                    claims_rejected: 1
+                    claims_withdrawn: 0
+                    remaining: 3
+                  claim_window:
+                    opens_at: '2024-09-01T00:00:00.000Z'
+                    closes_at: '2024-09-15T00:00:00.000Z'
+                  eligibility: null
+                  notes: null
+                  created_by: null
+                  opened_at: '2024-09-01T00:00:00.000Z'
+                  closed_at: null
+                  finalized_at: null
+                  created_at: '2024-08-20T02:00:00.000Z'
+                  updated_at: '2024-09-03T07:08:09.123Z'
+                  revision: '7'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+  post:
+    tags:
+      - quotas
+    operationId: createQuota
+    summary: 新建名额池
+    description: |
+      需要 `quota:manage`。创建的名额池初始状态**恒为 `draft`**，
+      `counts` 全零；这些字段不接受客户端指定。
+      创建后需调用 `POST /quotas/{quota_id}/open` 才会接受认领。
+
+      **唯一性**：同一 `contest.season` + `contest.name` + `contest.kind` 重复时
+      返回 `409 conflict`；如需调整已有池请用 `PATCH`。
+
+      **幂等**：`Idempotency-Key` 必填；同一主体 + 同一键重放返回**首次**创建的
+      名额池与相同的 `Location`，并带 `Idempotency-Replayed: true`。
+
+      **时序**：强一致，返回时名额池已可被 `GET /quotas/{quota_id}` 读到。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/quotas.yaml#/components/schemas/CreateQuotaRequest
+          example:
+            title: 2024 南京站名额
+            contest:
+              name: 2024 ICPC 亚洲区域赛（南京）
+              kind: regional
+              season: 2024-2025
+              external_id: icpc-2024-nanjing
+              held_on: '2024-11-16'
+              location: 南京
+              url: https://icpc.example.edu/nanjing-2024
+            quota_total: 6
+            max_claims_per_team: 2
+            claim_window:
+              opens_at: '2024-09-01T00:00:00.000Z'
+              closes_at: '2024-09-15T00:00:00.000Z'
+            eligibility: null
+            notes: 每队最多 3 人，含 1 名替补。
+    responses:
+      '201':
+        description: 创建成功，初始状态为 `draft`。
+        headers:
+          Location:
+            $ref: ../components/headers/common.yaml#/components/headers/Location
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/Quota
+            example:
+              id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              title: 2024 南京站名额
+              contest:
+                name: 2024 ICPC 亚洲区域赛（南京）
+                kind: regional
+                season: 2024-2025
+                external_id: icpc-2024-nanjing
+                held_on: '2024-11-16'
+                location: 南京
+                url: https://icpc.example.edu/nanjing-2024
+              quota_total: 6
+              max_claims_per_team: 2
+              status: draft
+              counts:
+                claims_pending: 0
+                claims_approved: 0
+                claims_rejected: 0
+                claims_withdrawn: 0
+                remaining: 6
+              claim_window:
+                opens_at: '2024-09-01T00:00:00.000Z'
+                closes_at: '2024-09-15T00:00:00.000Z'
+              eligibility: null
+              notes: 每队最多 3 人，含 1 名替补。
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              opened_at: null
+              closed_at: null
+              finalized_at: null
+              created_at: '2024-08-20T02:00:00.000Z'
+              updated_at: '2024-08-20T02:00:00.000Z'
+              revision: '1'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+quota:
+  get:
+    tags:
+      - quotas
+    operationId: getQuota
+    summary: 获取名额池
+    description: |
+      需要 `quota:read`。返回名额池及其计数快照。
+
+      **缓存**：带强 `ETag`；`If-None-Match` 命中返回 `304`（无响应体），
+      客户端应改为使用本地副本。不存在或不可见一律返回 `404 not_found`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 名额池当前状态。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/Quota
+            example:
+              id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              title: 2024 南京站名额
+              contest:
+                name: 2024 ICPC 亚洲区域赛（南京）
+                kind: regional
+                season: 2024-2025
+                external_id: icpc-2024-nanjing
+                held_on: '2024-11-16'
+                location: 南京
+                url: https://icpc.example.edu/nanjing-2024
+              quota_total: 6
+              max_claims_per_team: 2
+              status: open
+              counts:
+                claims_pending: 2
+                claims_approved: 3
+                claims_rejected: 1
+                claims_withdrawn: 0
+                remaining: 3
+              claim_window:
+                opens_at: '2024-09-01T00:00:00.000Z'
+                closes_at: '2024-09-15T00:00:00.000Z'
+              eligibility: null
+              notes: 每队最多 3 人，含 1 名替补。
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              opened_at: '2024-09-01T00:00:00.000Z'
+              closed_at: null
+              finalized_at: null
+              created_at: '2024-08-20T02:00:00.000Z'
+              updated_at: '2024-09-03T07:08:09.123Z'
+              revision: '7'
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+  patch:
+    tags:
+      - quotas
+    operationId: updateQuota
+    summary: 修改名额池
+    description: |
+      需要 `quota:manage`。合并式部分更新，只覆盖出现的字段。
+
+      **状态约束**：`status=finalized`（或 `archived`）后只能修改 `notes`，
+      修改其它字段返回 `409 quota_finalized`。
+      **配额约束**：把 `quota_total` 降到低于 `counts.claims_approved` 时
+      返回 `409 quota_exceeded`，不做任何修改。
+      **资格约束**：`eligibility.min_team_size > max_team_size` 等跨字段错误返回 `422`。
+
+      **并发**：建议带 `If-Match`（取 `GET` 的 `ETag`）；不匹配返回 `412 version_conflict`。
+      **幂等**：`Idempotency-Key` 必填，重放返回首次结果。
+      **时序**：强一致，返回的 `revision` 已递增，变更立即对后续请求生效。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/quotas.yaml#/components/schemas/UpdateQuotaRequest
+          example:
+            quota_total: 8
+            notes: 名额追加到 8 个。
+    responses:
+      '200':
+        description: 更新后的名额池。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/Quota
+            example:
+              id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              title: 2024 南京站名额
+              contest:
+                name: 2024 ICPC 亚洲区域赛（南京）
+                kind: regional
+                season: 2024-2025
+                external_id: icpc-2024-nanjing
+                held_on: '2024-11-16'
+                location: 南京
+                url: https://icpc.example.edu/nanjing-2024
+              quota_total: 8
+              max_claims_per_team: 2
+              status: open
+              counts:
+                claims_pending: 2
+                claims_approved: 3
+                claims_rejected: 1
+                claims_withdrawn: 0
+                remaining: 5
+              claim_window:
+                opens_at: '2024-09-01T00:00:00.000Z'
+                closes_at: '2024-09-15T00:00:00.000Z'
+              eligibility: null
+              notes: 名额追加到 8 个。
+              created_by: null
+              opened_at: '2024-09-01T00:00:00.000Z'
+              closed_at: null
+              finalized_at: null
+              created_at: '2024-08-20T02:00:00.000Z'
+              updated_at: '2024-09-04T07:08:09.123Z'
+              revision: '8'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+  delete:
+    tags:
+      - quotas
+    operationId: deleteQuota
+    summary: 删除名额池
+    description: |
+      需要 `quota:manage`。仅当池内**不存在任何 `approved` 认领**时可删除；
+      否则返回 `409 conflict`，应先走归档（`archived`）保留历史。
+
+      删除会级联删除该池的 `pending`/`rejected`/`withdrawn` 认领记录，
+      并发布 `quotas` 的 `delete` 变更事件。**不可撤销**。
+
+      **幂等**：`Idempotency-Key` 必填；对已删除的池重复调用同样返回 `204`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    responses:
+      '204':
+        $ref: ../components/responses/common.yaml#/components/responses/NoContent
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+quotaOpen:
+  post:
+    tags:
+      - quotas
+    operationId: openQuota
+    summary: 开启名额池：draft 转为 open
+    description: |
+      需要 `quota:manage`。把 `draft` 的名额池置为 `open`，开始接受认领。
+
+      **窗口**：未设置 `claim_window` 时，服务端以默认值补齐
+      `opens_at=now`、`closes_at=now+P14D`；已设置则原样保留。
+
+      **幂等**：重复对 `open` 的池调用返回当前资源（`200`），不报错也不改变
+      `opened_at`。对 `closed`/`finalized`/`archived` 的池调用返回 `409`
+      （`quota_finalized` 或 `conflict`），**不支持重新开启**。
+
+      **时序**：强一致；返回后窗口立即可用。会写审计日志。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    responses:
+      '200':
+        description: 名额池已开启（或本就处于 `open`）。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/Quota
+            example:
+              id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              title: 2024 南京站名额
+              contest:
+                name: 2024 ICPC 亚洲区域赛（南京）
+                kind: regional
+                season: 2024-2025
+              quota_total: 6
+              max_claims_per_team: 2
+              status: open
+              counts:
+                claims_pending: 0
+                claims_approved: 0
+                claims_rejected: 0
+                claims_withdrawn: 0
+                remaining: 6
+              claim_window:
+                opens_at: '2024-09-01T00:00:00.000Z'
+                closes_at: '2024-09-15T00:00:00.000Z'
+              eligibility: null
+              notes: null
+              created_by: null
+              opened_at: '2024-09-01T00:00:00.000Z'
+              closed_at: null
+              finalized_at: null
+              created_at: '2024-08-20T02:00:00.000Z'
+              updated_at: '2024-09-01T00:00:00.000Z'
+              revision: '2'
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+quotaClose:
+  post:
+    tags:
+      - quotas
+    operationId: closeQuota
+    summary: 关闭认领窗口：open 转为 closed
+    description: |
+      需要 `quota:manage`。把 `open` 的名额池置为 `closed`。
+
+      **语义**：关闭后**不再接受新认领**（提交认领返回 `409 quota_not_open`），
+      但已存在的 `pending` 认领**仍可审核**（批准/拒绝），直到 `finalize`。
+      因此 `closed` 是"只收审核、不收新报名"的状态。
+
+      **幂等**：重复对 `closed` 的池调用返回当前资源（`200`）。
+      对 `draft` 池调用返回 `409 quota_not_open`；对 `finalized`/`archived`
+      返回 `409 quota_finalized`。
+
+      **时序**：强一致；返回后新认领立即被拒绝。会写审计日志。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    responses:
+      '200':
+        description: 名额池已关闭（或本就处于 `closed`）。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/Quota
+            example:
+              id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              title: 2024 南京站名额
+              contest:
+                name: 2024 ICPC 亚洲区域赛（南京）
+                kind: regional
+                season: 2024-2025
+              quota_total: 6
+              max_claims_per_team: 2
+              status: closed
+              counts:
+                claims_pending: 2
+                claims_approved: 3
+                claims_rejected: 1
+                claims_withdrawn: 0
+                remaining: 3
+              claim_window: null
+              eligibility: null
+              notes: null
+              created_by: null
+              opened_at: '2024-09-01T00:00:00.000Z'
+              closed_at: '2024-09-15T00:00:00.000Z'
+              finalized_at: null
+              created_at: '2024-08-20T02:00:00.000Z'
+              updated_at: '2024-09-15T00:00:00.000Z'
+              revision: '9'
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+quotaFinalize:
+  post:
+    tags:
+      - quotas
+    operationId: finalizeQuota
+    summary: 定案名额池：closed 转为 finalized
+    description: |
+      需要 `quota:manage`。把 `closed` 的名额池定案，**不可撤销**。
+
+      **前置条件**：池内**候补之外**的 `pending` 认领必须已经处理完，否则返回 `409 conflict`
+      并在 `detail` 里列出 claim id 列表；**仍在候补**（`waitlist_position` 非空）的 `pending`
+      不阻塞定案——它们会被置为 `expired`，名额不会静默地留在一个永远不会被批准的状态里。
+
+      **副作用**：候补中的 `pending` 变为 `expired`；`finalized` 后所有审核端点
+      （approve/reject/withdraw/release）与认领端点都以 `409 quota_finalized` 拒绝；`counts` 冻结。
+      定案是**危险操作**，本系统不提供回退端点，如需重开请新建名额池。
+
+      **幂等**：重复对 `finalized` 的池调用返回当前资源（`200`）。
+      对 `draft` 池调用返回 `409 quota_not_open`。
+
+      **时序**：强一致；定案后 `GET /quotas/{quota_id}/summary` 立即反映冻结结果。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    responses:
+      '200':
+        description: 名额池已定案（或本就处于 `finalized`）。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/Quota
+            example:
+              id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              title: 2024 南京站名额
+              contest:
+                name: 2024 ICPC 亚洲区域赛（南京）
+                kind: regional
+                season: 2024-2025
+              quota_total: 6
+              max_claims_per_team: 2
+              status: finalized
+              counts:
+                claims_pending: 0
+                claims_approved: 4
+                claims_rejected: 2
+                claims_withdrawn: 0
+                remaining: 2
+              claim_window: null
+              eligibility: null
+              notes: null
+              created_by: null
+              opened_at: '2024-09-01T00:00:00.000Z'
+              closed_at: '2024-09-15T00:00:00.000Z'
+              finalized_at: '2024-09-16T00:00:00.000Z'
+              created_at: '2024-08-20T02:00:00.000Z'
+              updated_at: '2024-09-16T00:00:00.000Z'
+              revision: '12'
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+quotaSummary:
+  get:
+    tags:
+      - quotas
+    operationId: getQuotaSummary
+    summary: 获取名额池汇总
+    description: |
+      需要 `quota:read`。一次返回已批准认领、候补队列与计数，
+      供前端直接渲染"名额分配看板"而无需分页拉取全部认领。
+
+      **一致性**：`x-consistency: strong`——所有计数与两个列表来自**同一事务视图**，
+      彼此自洽（不会出现"列表 4 条但计数 3"）。`over_quota` 恒为 `false`，
+      仅为前端一致性自检保留。
+
+      **时序**：本接口不做缓存（没有 `ETag`），每次读取都反映最新已提交状态。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+    responses:
+      '200':
+        description: 名额池汇总。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/QuotaSummary
+            example:
+              quota_id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              quota_total: 6
+              counts:
+                claims_pending: 2
+                claims_approved: 3
+                claims_rejected: 1
+                claims_withdrawn: 0
+                remaining: 3
+              approved_claims:
+                - id: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  team:
+                    id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    name: DMU-1
+                  status: approved
+                  submitted_at: '2024-09-02T03:04:05.000Z'
+                  priority: 100
+              waitlist:
+                - id: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+                  team:
+                    id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+                    name: DMU-2
+                  status: pending
+                  submitted_at: '2024-09-03T03:04:05.000Z'
+                  priority: 100
+              over_quota: false
+              generated_at: '2024-09-04T07:08:09.123Z'
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+quotaClaims:
+  get:
+    tags:
+      - quotas
+    operationId: listQuotaClaims
+    summary: 列出认领申请
+    description: |
+      需要 `quota:read`。可按状态、队伍与提交者过滤；默认按 `submitted_at` 降序。
+
+      **可见性**：持有 `quota:read` 即可看到池内全部认领，含成员快照；
+      仅持有 `quota:claim` 的队伍成员只能看到本队认领（其它认领返回 `403 forbidden`）。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Page
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Size
+      - name: status
+        in: query
+        required: false
+        description: 只返回指定状态的认领。
+        schema:
+          $ref: ../components/schemas/quotas.yaml#/components/schemas/QuotaClaimStatus
+        example: pending
+      - name: team_id
+        in: query
+        required: false
+        description: 只返回指定队伍的认领。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: principal_id
+        in: query
+        required: false
+        description: 只返回成员中包含该主体的认领。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: sort
+        in: query
+        required: false
+        description: 排序键；`priority` 升序时数值小的在前。
+        schema:
+          type: string
+          enum:
+            - submitted_at
+            - priority
+            - status
+          default: submitted_at
+        example: submitted_at
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Order
+    responses:
+      '200':
+        description: 认领分页列表。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/PagedQuotaClaim
+            example:
+              page: 1
+              size: 20
+              total: 1
+              has_next: false
+              items:
+                - id: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  quota_id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  team:
+                    id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    name: DMU-1
+                  members:
+                    - principal:
+                        id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                        username: alice
+                        display_name: 张三
+                        kind: human
+                      role: member
+                      display_name: 张三
+                      student_id: '2220210000'
+                      confirmed: true
+                  status: pending
+                  priority: 100
+                  waitlist_position: null
+                  submitted_by:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  submitted_at: '2024-09-02T03:04:05.000Z'
+                  decided_by: null
+                  decided_at: null
+                  decision_note: null
+                  expires_at: null
+                  created_at: '2024-09-02T03:04:05.000Z'
+                  updated_at: '2024-09-02T03:04:05.000Z'
+                  revision: '1'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+  post:
+    tags:
+      - quotas
+    operationId: createQuotaClaim
+    summary: 提交认领申请
+    description: |
+      需要 `quota:claim`（或 `quota:manage`）。可由队伍队长提交，也可由持有
+      `quota:claim` 的机器人**代为提交**；服务端校验提交者属于该队伍或具备代提权限。
+
+      **状态**：提交成功后认领状态**恒为 `pending`**，必须经管理员
+      `POST .../approve` 批准才占用名额；`pending` 不减少 `remaining`。
+
+      **错误分支**：
+
+      - 同一队伍在本池的未终结认领数（`pending` + `approved`）已达
+        `max_claims_per_team`，默认 2→ `409 team_claim_limit_reached`；
+      - 池处于 `draft`，或当前早于 `claim_window.opens_at` → `409 quota_not_open`；
+      - 当前晚于 `claim_window.closes_at` → `409 claim_window_closed`；
+      - 池处于 `closed` → `409 quota_not_open`；`finalized`/`archived` → `409 quota_finalized`；
+      - 成员不在任何社团（`clubs` 为空）或人数不在 1..8 → `422 validation_failed`；
+      - 不满足 `eligibility` → `403 forbidden`。
+
+      **超额**：认领数超过 `remaining` 时**允许提交**，响应中的
+      `waitlist_position` 给出候补顺位，不返回错误。
+
+      **幂等**：`Idempotency-Key` 必填；同一键重放返回**同一个**认领
+      （不会重复占用每队额度），并带 `Idempotency-Replayed: true`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/quotas.yaml#/components/schemas/CreateQuotaClaimRequest
+          example:
+            team_id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            members:
+              - principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                role: member
+              - principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+                role: member
+              - principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X2
+                role: reserve
+            priority: 100
+            note: 三人队，第三人为替补。
+    responses:
+      '201':
+        description: 认领已提交，状态为 `pending`，等待管理员审核。
+        headers:
+          Location:
+            $ref: ../components/headers/common.yaml#/components/headers/Location
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/QuotaClaim
+            example:
+              id: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              quota_id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              team:
+                id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                name: DMU-1
+              members:
+                - principal:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  role: member
+                  display_name: 张三
+                  student_id: '2220210000'
+                  confirmed: true
+              status: pending
+              priority: 100
+              waitlist_position: null
+              submitted_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              submitted_at: '2024-09-02T03:04:05.000Z'
+              decided_by: null
+              decided_at: null
+              decision_note: null
+              expires_at: null
+              created_at: '2024-09-02T03:04:05.000Z'
+              updated_at: '2024-09-02T03:04:05.000Z'
+              revision: '1'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+quotaClaim:
+  get:
+    tags:
+      - quotas
+    operationId: getQuotaClaim
+    summary: 获取单个认领
+    description: |
+      需要 `quota:read`。返回认领详情与成员快照。
+
+      **缓存**：带强 `ETag`；`If-None-Match` 命中返回 `304`。
+      认领不存在、或属于其它队伍且调用者只有 `quota:claim` 时返回 `404 not_found`
+      （避免泄漏他人队伍信息）。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: claim_id
+        in: path
+        required: true
+        description: 认领 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 认领详情。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/QuotaClaim
+            example:
+              id: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              quota_id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              team:
+                id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                name: DMU-1
+              members:
+                - principal:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  role: member
+                  display_name: 张三
+                  student_id: '2220210000'
+                  confirmed: true
+              status: approved
+              priority: 100
+              waitlist_position: null
+              submitted_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              submitted_at: '2024-09-02T03:04:05.000Z'
+              decided_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+                username: coach
+                display_name: 李四
+                kind: human
+              decided_at: '2024-09-03T01:02:03.000Z'
+              decision_note: 名额充足，同意。
+              expires_at: null
+              created_at: '2024-09-02T03:04:05.000Z'
+              updated_at: '2024-09-03T01:02:03.000Z'
+              revision: '2'
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+
+quotaClaimApprove:
+  post:
+    tags:
+      - quotas
+    operationId: approveQuotaClaim
+    summary: 批准认领，管理员审核
+    description: |
+      需要 `quota:manage`。**这是认领生效的唯一途径**：批准后该认领占用一个名额
+      （`claims_approved` 加一，`remaining` 减一）。
+
+      **超额**：已批准数已达到 `quota_total` 时返回 `409 quota_exceeded`，
+      该认领**保持 `pending`**，响应 `detail` 与认领的 `waitlist_position`
+      给出候补顺位（管理员应先拒绝/让出名额或提高 `quota_total`）。
+
+      **状态**：只允许对 `pending` 认领操作；对 `approved`/`rejected`/`withdrawn`/
+      `expired` 调用返回 `409 conflict`。已 `finalized` 的池返回 `409 quota_finalized`。
+
+      **不可撤销**：批准后本系统不提供回退端点；如需让出名额，
+      由管理员提高/调整名额池或新建名额池处理。会写审计日志。
+
+      **幂等**：`Idempotency-Key` 必填；同一键重放返回首次的批准结果。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: claim_id
+        in: path
+        required: true
+        description: 认领 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/quotas.yaml#/components/schemas/ApproveQuotaClaimRequest
+          example:
+            note: 名额充足，同意。
+    responses:
+      '200':
+        description: 批准后的认领。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/QuotaClaim
+            example:
+              id: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              quota_id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              team:
+                id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                name: DMU-1
+              members:
+                - principal:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  role: member
+                  display_name: 张三
+                  student_id: '2220210000'
+                  confirmed: true
+              status: approved
+              priority: 100
+              waitlist_position: null
+              submitted_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              submitted_at: '2024-09-02T03:04:05.000Z'
+              decided_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+                username: coach
+                display_name: 李四
+                kind: human
+              decided_at: '2024-09-03T01:02:03.000Z'
+              decision_note: 名额充足，同意。
+              expires_at: null
+              created_at: '2024-09-02T03:04:05.000Z'
+              updated_at: '2024-09-03T01:02:03.000Z'
+              revision: '2'
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+quotaClaimReject:
+  post:
+    tags:
+      - quotas
+    operationId: rejectQuotaClaim
+    summary: 拒绝认领，管理员审核
+    description: |
+      需要 `quota:manage`。拒绝必须给出 `reason`，理由会写入 `decision_note`、
+      展示给提交者并进入审计日志。
+
+      **状态**：只允许对 `pending` 认领操作；对已 `approved` 的认领调用返回
+      `409 conflict`（拒绝不能撤销已占用的名额）。`pending` 本就不占名额，
+      拒绝只改变状态并释放其候补顺位。
+      已 `finalized` 的池返回 `409 quota_finalized`。
+
+      **幂等**：`Idempotency-Key` 必填；同一键重放返回首次的拒绝结果。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: claim_id
+        in: path
+        required: true
+        description: 认领 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/quotas.yaml#/components/schemas/RejectQuotaClaimRequest
+          example:
+            reason: 该队伍已有两支队报名，超出每队上限。
+    responses:
+      '200':
+        description: 拒绝后的认领。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/QuotaClaim
+            example:
+              id: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              quota_id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              team:
+                id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                name: DMU-1
+              members:
+                - principal:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  role: member
+                  display_name: 张三
+                  student_id: '2220210000'
+                  confirmed: true
+              status: rejected
+              priority: 100
+              waitlist_position: null
+              submitted_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              submitted_at: '2024-09-02T03:04:05.000Z'
+              decided_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+                username: coach
+                display_name: 李四
+                kind: human
+              decided_at: '2024-09-03T01:02:03.000Z'
+              decision_note: 该队伍已有两支队报名，超出每队上限。
+              expires_at: null
+              created_at: '2024-09-02T03:04:05.000Z'
+              updated_at: '2024-09-03T01:02:03.000Z'
+              revision: '2'
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+quotaClaimWithdraw:
+  post:
+    tags:
+      - quotas
+    operationId: withdrawQuotaClaim
+    summary: 撤销认领，提交方或管理员可调用
+    description: |
+      撤销一个**尚未审核**的认领。调用者必须是：
+
+      - 提交该认领的本人，或该认领所属队伍的队长（scope `quota:claim`）；或
+      - 持有 `quota:manage` 的管理员。
+
+      其它主体的请求返回 `403 forbidden`；认领不存在或不可见返回 `404 not_found`。
+
+      **状态**：只有 `pending` 可撤销；对 `approved`/`rejected`/`withdrawn`/`expired`
+      调用返回 `409 conflict`（已批准的名额不能由此端点释放）。
+      已 `finalized` 的池返回 `409 quota_finalized`。
+
+      **副作用**：撤销释放该认领的候补顺位，队列中后续认领的
+      `waitlist_position` 立即前移（不会自动批准）。会写审计日志。
+
+      **幂等**：`Idempotency-Key` 必填；同一键重放返回首次的撤销结果。
+      无请求体，故不引用 Request schema。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: claim_id
+        in: path
+        required: true
+        description: 认领 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    responses:
+      '200':
+        description: 撤销后的认领（状态为 `withdrawn`）。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/QuotaClaim
+            example:
+              id: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              quota_id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              team:
+                id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                name: DMU-1
+              members:
+                - principal:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  role: member
+                  display_name: 张三
+                  student_id: '2220210000'
+                  confirmed: true
+              status: withdrawn
+              priority: 100
+              waitlist_position: null
+              submitted_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              submitted_at: '2024-09-02T03:04:05.000Z'
+              decided_by: null
+              decided_at: null
+              decision_note: null
+              expires_at: null
+              created_at: '2024-09-02T03:04:05.000Z'
+              updated_at: '2024-09-04T01:02:03.000Z'
+              revision: '2'
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+quotaClaimRelease:
+  post:
+    tags:
+      - quotas
+    operationId: releaseQuotaClaim
+    summary: 释放已批准的认领，管理员可调用
+    description: |
+      **用途**：名额被错误占用、或队伍退赛时，管理员把**已批准**的认领释放掉，让名额回到池里。
+      队伍自己不能释放已批准名额——那需要管理员复核，因此没有对应的自助端点。
+
+      **权限**：需要 `quota:manage`。
+
+      **状态**：只有 `approved` 可释放，结果状态为 `released`；对
+      `pending`/`rejected`/`withdrawn`/`expired`/`released` 调用返回 `409 conflict`
+      （未批准的请用 `POST .../withdraw`）。池已 `finalized` 或 `archived` 返回 `409 quota_finalized`。
+
+      **副作用**：`counts.remaining` 立即增加，候补队列按优先级前移，**不会自动批准**任何候补；
+      写审计记录，`reason` 一并入库。
+
+      **并发**：支持 `If-Match` + `revision`，不匹配返回 `412 precondition_failed`。
+      **幂等**：`Idempotency-Key` 必填，同键重放返回首次结果。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: claim_id
+        in: path
+        required: true
+        description: 认领 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+    requestBody:
+      required: false
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/quotas.yaml#/components/schemas/ReleaseQuotaClaimRequest
+          example:
+            reason: 队伍退赛
+    responses:
+      '200':
+        description: 处理后的认领（状态为 `released`）。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/QuotaClaim
+            example:
+              id: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              quota_id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              team:
+                id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                name: DMU-1
+              members:
+                - principal:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  role: member
+                  display_name: 张三
+                  student_id: '2220210000'
+                  confirmed: true
+              status: released
+              priority: 100
+              waitlist_position: null
+              submitted_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              submitted_at: '2024-05-01T02:00:00.000Z'
+              decided_by: null
+              decided_at: null
+              decision_note: null
+              expires_at: null
+              created_at: '2024-05-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:10:00.000Z'
+              revision: '3'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+quotaClaimConfirm:
+  post:
+    tags:
+      - quotas
+    operationId: confirmQuotaClaimMember
+    summary: 确认自己在认领里的参赛身份
+    description: |
+      **用途**：认领提交后，名单里的每个成员自己去确认"我确实参赛"。这是成员自助动作，
+      不需要管理员介入，也让管理员在审核前能看到谁已经确认。
+
+      **权限**：需要 `quota:claim`，且调用者**必须在该认领的成员名单里**；不在名单里返回
+      `403 forbidden`。
+
+      **状态**：只对 `pending` 或 `approved` 的认领有效，结果把调用者那条成员的
+      `confirmed` 置为 `true`；其它状态返回 `409 conflict`。
+
+      **副作用**：写审计记录；不影响名额计数。
+
+      **幂等**：`Idempotency-Key` 必填；同一键重放返回首次结果，重复确认不报错。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: claim_id
+        in: path
+        required: true
+        description: 认领 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    responses:
+      '200':
+        description: 处理后的认领（状态为 `pending`）。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/QuotaClaim
+            example:
+              id: claim_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              quota_id: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              team:
+                id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                name: DMU-1
+              members:
+                - principal:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  role: member
+                  display_name: 张三
+                  student_id: '2220210000'
+                  confirmed: true
+              status: pending
+              priority: 100
+              waitlist_position: null
+              submitted_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              submitted_at: '2024-05-01T02:00:00.000Z'
+              decided_by: null
+              decided_at: null
+              decision_note: null
+              expires_at: null
+              created_at: '2024-05-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:10:00.000Z'
+              revision: '3'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+quotaArchive:
+  post:
+    tags:
+      - quotas
+    operationId: archiveQuota
+    summary: 归档名额池
+    description: |
+      **用途**：赛季结束后把名额池归档，之后一律只读。名额分配走完
+      （`finalized`）之后才允许归档，避免把还在审核的池冻住。
+
+      **权限**：需要 `quota:manage`。
+
+      **状态**：只有 `finalized` 可归档，结果状态为 `archived`；其它状态返回
+      `409 conflict`（`quota_finalized` 不适用此处）。
+
+      **副作用**：池与其中的认领全部变为只读；`counts` 冻结；写审计记录。
+      **幂等**：`Idempotency-Key` 必填；对已归档的池重放返回首次结果。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: quota_id
+        in: path
+        required: true
+        description: 名额池 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: quota_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    responses:
+      '200':
+        description: 归档后的名额池（状态为 `archived`）。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/quotas.yaml#/components/schemas/Quota
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+

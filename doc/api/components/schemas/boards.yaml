@@ -1,0 +1,1557 @@
+components:
+  schemas:
+    # ================================================================ 枚举
+    ScoreboardScope:
+      type: string
+      description: |
+        榜单口径。`individual` 按主体（成员）排名，`team` 按队伍排名。
+        口径决定条目表示的是成员还是队伍，也决定按队伍聚合的统计端点如何解释
+        `team_ids` 过滤条件。
+      enum:
+        - individual
+        - team
+      examples:
+        - individual
+
+    ScoreboardMetric:
+      type: string
+      description: |
+        排名依据的分值口径，决定条目 `score` 的计算方式：
+        `solved_count` 累计解题数；`rating` 当前 rating（`rating` 口径为单平台时用
+        `judge` 指定平台）；`rating_sum` 各平台 rating 之和；`activity_days` 活跃天数；
+        `weighted` 服务器配置的加权综合分（权重由服务端参数决定，不对外暴露公式）。
+      enum:
+        - solved_count
+        - rating
+        - rating_sum
+        - activity_days
+        - weighted
+      examples:
+        - solved_count
+
+    ScoreboardPeriodKind:
+      type: string
+      description: |
+        统计区间种类。`all_time` 全部历史；`season` 指定学年（`season` 字段）；
+        `rolling` 相对当前时刻的滚动窗口（`window` 字段，如 `P90D`）；
+        `custom` 绝对区间（`from`/`to` 字段，`null` 表示开放端）。
+      enum:
+        - all_time
+        - season
+        - rolling
+        - custom
+      examples:
+        - season
+
+    TrendBucket:
+      type: string
+      description: |
+        trend 序列的切桶粒度。`hour` 仅允许查询最近 30 天（超出返回 `422`）；
+        `week` 以 `timezone` 时区下的周一 00:00 为桶起点；`month` 按自然月切分。
+      enum:
+        - hour
+        - day
+        - week
+        - month
+      examples:
+        - day
+
+    TrendMetric:
+      type: string
+      description: |
+        trend 端点可统计的指标：`solved_count` 累计解题数、`submissions` 提交数、
+        `accepted` 通过数、`rating` 平均 rating、`active_members` 活跃成员数、
+        `acceptance_rate` 通过率（0..1）、`rating_delta` 区间内 rating 变化量（由 rating 记录派生）。
+      enum:
+        - solved_count
+        - submissions
+        - accepted
+        - rating
+        - active_members
+        - acceptance_rate
+        - rating_delta
+      examples:
+        - solved_count
+
+    StatsGroupBy:
+      type: string
+      description: |
+        统计结果的分组维度，决定响应中 `groups` 的数量与 `key` 的取值：
+        `none` 不分组（单个 `key=all`）；`judge` 按平台；`team` 按队伍；
+        `enrollment_year` 按入学年份；`label` 按主体标签；`club` 按社团身份，
+        用于分别看两个社团的训练情况。
+      enum:
+        - none
+        - judge
+        - team
+        - club
+        - enrollment_year
+        - label
+      examples:
+        - none
+
+    HeatmapUnit:
+      type: string
+      description: |
+        热力图的取值口径：`submissions` 当日提交数；`accepted` 当日通过数；
+        `active_days` 当日是否活跃（`0`/`1` 口径，配合 `level` 展示活跃连续性）。
+      enum:
+        - submissions
+        - accepted
+        - active_days
+      examples:
+        - submissions
+
+    HistogramMetric:
+      type: string
+      description: |
+        直方图的分布指标。`solved_count` 累计解题数、`rating` 当前 rating、
+        `max_rating` 历史最高 rating、`submissions_30d` 与 `active_days_30d` 为
+        **截至当前时刻的滚动 30 天快照**、`acceptance_rate` 通过率（0..1）、
+        `rating_delta` 区间内 rating 变化量（由 rating 记录派生）。
+      enum:
+        - solved_count
+        - rating
+        - max_rating
+        - submissions_30d
+        - active_days_30d
+        - acceptance_rate
+        - rating_delta
+      examples:
+        - solved_count
+
+    # ================================================================ 定义
+    ScoreboardFilter:
+      type: object
+      description: |
+        榜单的成员/队伍筛选条件。同一字段内的多个取值是 OR（命中任一即可），
+        不同字段之间是 AND。所有字段可省略；省略或空数组表示该维度不限制。
+      properties:
+        clubs:
+          type: array
+          description: |
+            仅统计属于这些社团之一的成员，命中任一即可；省略表示不限社团。
+            两个社团的名单不同，按社团出榜时用它区分。
+          items:
+            $ref: './identity.yaml#/components/schemas/ClubCode'
+        judges:
+          type: array
+          description: 仅统计这些平台的采集数据；省略表示全部已启用平台。
+          items:
+            $ref: './common.yaml#/components/schemas/Judge'
+        enrollment_years:
+          type: array
+          description: 仅统计这些入学年份的主体。
+          items:
+            type: integer
+            minimum: 1990
+            maximum: 2100
+        labels:
+          type: array
+          description: 仅统计带有任一标签的主体（标签本身不授予权限）。
+          items:
+            $ref: './identity.yaml#/components/schemas/Label'
+        team_ids:
+          type: array
+          description: 仅统计属于这些队伍的主体/队伍。
+          items:
+            $ref: './common.yaml#/components/schemas/Id'
+        include_inactive:
+          type: boolean
+          default: false
+          description: |
+            为 `false`，默认时排除长期未活跃成员（与成员名单导出同口径）；
+            为 `true` 时保留全部主体，仅在榜单上标记其活动度。
+      examples:
+        - judges:
+            - codeforces
+            - atcoder
+          enrollment_years:
+            - 2022
+            - 2023
+          labels:
+            - member
+          team_ids: []
+          include_inactive: false
+
+    ScoreboardPeriod:
+      type: object
+      description: |
+        榜单的统计区间。`kind` 决定其它字段的有效性：`season` 用 `season`，
+        `rolling` 用 `window`，`custom` 用 `from`/`to`（`null` 表示该端开放），
+        `all_time` 不使用任何附加字段。区间按闭开区间 `[from, to)` 解释。
+      required:
+        - kind
+      properties:
+        kind:
+          $ref: '#/components/schemas/ScoreboardPeriodKind'
+        season:
+          type:
+            - string
+            - 'null'
+          pattern: '^[0-9]{4}-[0-9]{4}$'
+          description: 学年标识，如 `2024-2025`；仅 `kind=season` 时有值。
+        window:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Duration'
+            - type: 'null'
+          description: 相对当前时刻的滚动窗口，如 `P90D`；仅 `kind=rolling` 时有值。
+        from:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 区间起点，含；仅 `kind=custom` 时有值，`null` 表示不设下界。
+        to:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 区间终点，不含；仅 `kind=custom` 时有值，`null` 表示截至当前时刻。
+      examples:
+        - kind: season
+          season: 2024-2025
+          window: null
+          from: null
+          to: null
+
+    Scoreboard:
+      type: object
+      description: |
+        榜单定义与物化状态。需求里说的 scoreList 就是本契约的榜单：把采集到的
+        提交与 rating 按平台、个人或队伍算成名次与分数。榜单是**物化聚合**：`rank`/`score` 等条目数据由
+        最近一次物化任务写入，读取端可能落后于采集写入；`generated_at` 是物化时刻，
+        `stale` 表示已超出新鲜度上界（`PT15M`），此时应触发重建。
+      required:
+        - id
+        - name
+        - scope
+        - metric
+        - period
+        - filter
+        - visibility
+        - entry_count
+        - generated_at
+        - stale
+        - created_at
+        - updated_at
+        - revision
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 榜单名称，在全部榜单内唯一。
+          examples:
+            - CF 2024-2025 个人榜
+        description:
+          type:
+            - string
+            - 'null'
+          maxLength: 500
+          description: 榜单用途说明；无说明时为 `null`。
+        scope:
+          $ref: '#/components/schemas/ScoreboardScope'
+        metric:
+          $ref: '#/components/schemas/ScoreboardMetric'
+        judge:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Judge'
+            - type: 'null'
+          description: 榜单限定的平台；`null` 表示跨平台（合并各平台数据后再排名）。
+        judge_label:
+          type:
+            - string
+            - 'null'
+          maxLength: 64
+          description: |
+            `judge=other` 时必填的平台人类可读名称；其余情况可为 `null`。
+          examples:
+            - 校内 OJ
+        period:
+          $ref: '#/components/schemas/ScoreboardPeriod'
+        filter:
+          $ref: '#/components/schemas/ScoreboardFilter'
+        visibility:
+          $ref: './common.yaml#/components/schemas/Visibility'
+        entry_count:
+          type: integer
+          minimum: 0
+          description: 最近一次物化产出的条目数；从未物化时为 `0`。
+          examples:
+            - 137
+        generated_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: |
+            最近一次物化**完成**的时刻；从未物化，例如刚创建、首次重算尚未结束时为
+            `null`。客户端据此计算新鲜度。
+        stale:
+          type: boolean
+          description: |
+            为 `true` 表示条目数据落后于采集写入（尚未物化、物化中，或已超过
+            `PT15M` 上界）。此时读取条目仍返回上一版结果，但应触发重建。
+        next_refresh_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 调度器计划的下一次刷新时刻；无计划时为 `null`。
+        source_updated_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: |
+            本榜单所引用采集数据（提交、rating 等）最近一次写入时刻，用于判断物化落后
+            了多久；从未采集到时为 `null`。
+        revision:
+          type: string
+          description: 版本标记，与 `ETag` 值一致；可用 `If-Match` 做乐观并发控制。
+          examples:
+            - '17'
+        created_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        updated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        created_by:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/PrincipalRef'
+            - type: 'null'
+          description: 创建者；由系统调度创建时为 `null`。
+      examples:
+        - id: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          name: CF 2024-2025 个人榜
+          description: 跨平台个人积分榜，按累计解题数排名。
+          scope: individual
+          metric: solved_count
+          judge: codeforces
+          judge_label: null
+          period:
+            kind: season
+            season: 2024-2025
+            window: null
+            from: null
+            to: null
+          filter:
+            judges:
+              - codeforces
+              - atcoder
+            enrollment_years:
+              - 2022
+              - 2023
+            labels:
+              - member
+            team_ids: []
+            include_inactive: false
+          visibility: public
+          entry_count: 137
+          generated_at: '2024-05-06T07:00:00.000Z'
+          stale: false
+          next_refresh_at: '2024-05-06T07:15:00.000Z'
+          source_updated_at: '2024-05-06T06:58:00.000Z'
+          revision: '17'
+          created_at: '2024-01-02T03:04:05.000Z'
+          updated_at: '2024-05-06T07:00:00.000Z'
+          created_by:
+            id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            username: alice
+            display_name: 张三
+            kind: human
+
+    CreateScoreboardRequest:
+      type: object
+      description: |
+        创建榜单定义。`period`、`filter`、`visibility` 省略时取默认值
+        （`{kind: all_time}`、`{include_inactive: false}`、`members`）；
+        `judge` 省略或传 `null` 表示跨平台，`judge=other` 时必须同时给 `judge_label`。
+        创建只写入定义：响应中的 `entry_count` 恒为 `0`、`stale` 恒为 `true`，
+        条目要等首次物化完成后才可用。
+      required:
+        - name
+        - scope
+        - metric
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 榜单名称，在全部榜单内唯一；重名返回 `409 conflict`。
+          examples:
+            - CF 2024-2025 个人榜
+        description:
+          type: string
+          maxLength: 500
+          description: 榜单用途说明。
+        scope:
+          $ref: '#/components/schemas/ScoreboardScope'
+        metric:
+          $ref: '#/components/schemas/ScoreboardMetric'
+        judge:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Judge'
+            - type: 'null'
+          description: 限定平台；省略或 `null` 表示跨平台。
+        judge_label:
+          type: string
+          maxLength: 64
+          description: '`judge=other` 时的平台可读名称。'
+        period:
+          $ref: '#/components/schemas/ScoreboardPeriod'
+        filter:
+          $ref: '#/components/schemas/ScoreboardFilter'
+        visibility:
+          $ref: './common.yaml#/components/schemas/Visibility'
+      examples:
+        - name: CF 2024-2025 个人榜
+          description: 跨平台个人积分榜，按累计解题数排名。
+          scope: individual
+          metric: solved_count
+          judge: codeforces
+          period:
+            kind: season
+            season: 2024-2025
+          filter:
+            judges:
+              - codeforces
+            include_inactive: false
+          visibility: public
+
+    UpdateScoreboardRequest:
+      type: object
+      description: |
+        合并式更新：只覆盖出现的字段，未出现的字段保持不变。`description` 传 `null`
+        表示清空；`judge` 传 `null` 表示改为跨平台。修改 `scope`、`metric`、`period`
+        或 `filter` 会改变聚合口径，服务端会立即把该榜单置为 `stale: true` 并排队重算，
+        因此成功响应中的 `stale` 为 `true`、`generated_at` 仍是上一版物化时刻。
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 新名称；与其它榜单重名返回 `409 conflict`。
+        description:
+          oneOf:
+            - type: string
+              maxLength: 500
+            - type: 'null'
+          description: 新说明；`null` 表示清空。
+        scope:
+          $ref: '#/components/schemas/ScoreboardScope'
+        metric:
+          $ref: '#/components/schemas/ScoreboardMetric'
+        judge:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Judge'
+            - type: 'null'
+          description: 新平台；`null` 表示跨平台。
+        judge_label:
+          oneOf:
+            - type: string
+              maxLength: 64
+            - type: 'null'
+          description: 新平台可读名称；`null` 表示清空（`judge` 非 `other` 时必须为 `null`）。
+        period:
+          $ref: '#/components/schemas/ScoreboardPeriod'
+        filter:
+          $ref: '#/components/schemas/ScoreboardFilter'
+        visibility:
+          $ref: './common.yaml#/components/schemas/Visibility'
+      examples:
+        - metric: rating_sum
+          filter:
+            judges:
+              - codeforces
+              - atcoder
+            include_inactive: true
+          visibility: members
+
+    # ================================================================ 条目
+    ScoreboardEntryJudge:
+      type: object
+      description: |
+        条目在单个平台上的明细。`rating`/`max_rating` 仅平台有 rating 机制时才有值；
+        `rating_delta_30d` 为最近 30 天该平台 rating 变化量（由 rating 记录派生）。
+      required:
+        - judge
+      properties:
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        rating:
+          type:
+            - integer
+            - 'null'
+          description: 该平台当前 rating；平台无 rating 或未采集到时为 `null`。
+        max_rating:
+          type:
+            - integer
+            - 'null'
+          description: 该平台历史最高 rating；未知时为 `null`。
+        solved_count:
+          type: integer
+          minimum: 0
+          description: 该平台累计解题数。
+        submissions:
+          type: integer
+          minimum: 0
+          description: 该平台累计提交数，含未通过。
+        rating_delta_30d:
+          type:
+            - integer
+            - 'null'
+          description: 该平台最近 30 天 rating 变化量（由 rating 记录派生）；未知时为 `null`。
+        last_accepted_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 最近一次通过提交的时刻；从未通过时为 `null`。
+      examples:
+        - judge: codeforces
+          rating: 1873
+          max_rating: 1901
+          solved_count: 812
+          submissions: 2310
+          rating_delta_30d: 42
+          last_accepted_at: '2024-05-05T13:20:00.000Z'
+
+    ScoreboardEntry:
+      type: object
+      description: |
+        榜单中的单条排名记录（成员或队伍），由最近一次物化生成。`rank` 为物化时刻的
+        名次（并列时同名次，后续名次跳号）；`rank_delta` 是相对**上一次物化**的名次变化，
+        正数表示名次上升。
+      required:
+        - id
+        - scoreboard_id
+        - rank
+        - display_name
+        - score
+        - metric
+        - solved_count
+        - per_judge
+        - updated_at
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        scoreboard_id:
+          $ref: './common.yaml#/components/schemas/Id'
+        rank:
+          type: integer
+          minimum: 1
+          description: 物化时刻的名次，从 1 开始；并列时取相同名次。
+          examples:
+            - 3
+        display_name:
+          type: string
+          minLength: 1
+          description: 展示名；`scope=team` 时为队伍名，否则为主体展示名。
+        principal:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/PrincipalRef'
+            - type: 'null'
+          description: 主体引用；`scope=team` 时为 `null`。
+        team:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/TeamRef'
+            - type: 'null'
+          description: 所属队伍引用；`scope=individual` 且主体无队伍时为 `null`。
+        score:
+          type: number
+          description: 按榜单 `metric` 计算的分值，排名依据。
+          examples:
+            - 812
+        metric:
+          $ref: '#/components/schemas/ScoreboardMetric'
+        solved_count:
+          type: integer
+          minimum: 0
+          description: 榜单区间内的累计解题数（`metric` 为解题数时与 `score` 相同）。
+        penalty:
+          type:
+            - integer
+            - 'null'
+          description: 罚时（分钟）；仅按 ICPC 规则排名的榜单有值，否则为 `null`。
+        activity_days:
+          type: integer
+          minimum: 0
+          description: 榜单区间内有提交的活跃天数。
+        rating:
+          type:
+            - integer
+            - 'null'
+          description: 当前 rating；或各平台 rating 之和（`metric=rating_sum`）；未知为 `null`。
+        rating_delta:
+          type:
+            - integer
+            - 'null'
+          description: 榜单区间内的 rating 变化量（由 rating 记录派生）；未知为 `null`。
+        rank_delta:
+          type:
+            - integer
+            - 'null'
+          description: |
+            相对上一次物化的名次变化，正数表示名次上升，例如 `+2`，负数表示下降；
+            首次物化或无可比快照时为 `null`。
+        per_judge:
+          type: array
+          description: 分平台明细；`judge=other` 的平台同样出现在此数组中。
+          items:
+            $ref: '#/components/schemas/ScoreboardEntryJudge'
+        updated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+      examples:
+        - id: sbe_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+          scoreboard_id: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          rank: 3
+          display_name: 张三
+          principal:
+            id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            username: alice
+            display_name: 张三
+            kind: human
+          team:
+            id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            name: DMU-1
+          score: 812
+          metric: solved_count
+          solved_count: 812
+          penalty: null
+          activity_days: 96
+          rating: 1873
+          rating_delta: 42
+          rank_delta: 2
+          per_judge:
+            - judge: codeforces
+              rating: 1873
+              max_rating: 1901
+              solved_count: 812
+              submissions: 2310
+              rating_delta_30d: 42
+              last_accepted_at: '2024-05-05T13:20:00.000Z'
+          updated_at: '2024-05-06T07:00:00.000Z'
+
+    PagedScoreboardEntry:
+      description: |
+        榜单条目的偏移分页结果。除分页元信息外还带**物化状态**：`generated_at` 是本页数据
+        的物化时刻，`stale` 表示已超过新鲜度上界。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/PageMeta'
+        - type: object
+          required:
+            - items
+            - generated_at
+            - stale
+          properties:
+            items:
+              type: array
+              description: 当前页条目，按请求的 `sort`/`order` 排序。
+              items:
+                $ref: '#/components/schemas/ScoreboardEntry'
+            generated_at:
+              oneOf:
+                - $ref: './common.yaml#/components/schemas/Timestamp'
+                - type: 'null'
+              description: 产生本页数据的物化完成时刻；从未物化时为 `null`，此时 `items` 为空。
+            stale:
+              type: boolean
+              description: 为 `true` 表示条目落后于采集写入或已超过 `PT15M` 上界，应提示并触发重建。
+      examples:
+        - page: 1
+          size: 20
+          total: 137
+          has_next: true
+          generated_at: '2024-05-06T07:00:00.000Z'
+          stale: false
+          items:
+            - id: sbe_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+              scoreboard_id: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              rank: 3
+              display_name: 张三
+              score: 812
+              metric: solved_count
+              solved_count: 812
+              rank_delta: 2
+              per_judge:
+                - judge: codeforces
+                  solved_count: 812
+                  submissions: 2310
+              updated_at: '2024-05-06T07:00:00.000Z'
+
+    PagedScoreboard:
+      description: 榜单定义的偏移分页结果。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/PageMeta'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页榜单定义。
+              items:
+                $ref: '#/components/schemas/Scoreboard'
+      examples:
+        - page: 1
+          size: 20
+          total: 4
+          has_next: false
+          items:
+            - id: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              name: CF 2024-2025 个人榜
+              scope: individual
+              metric: solved_count
+              period:
+                kind: all_time
+              filter:
+                include_inactive: false
+              visibility: public
+              entry_count: 137
+              generated_at: '2024-05-06T07:00:00.000Z'
+              stale: false
+              created_at: '2024-01-02T03:04:05.000Z'
+              updated_at: '2024-05-06T07:00:00.000Z'
+              revision: '17'
+
+    # ================================================================ 历史
+    ScoreboardHistoryPoint:
+      type: object
+      description: |
+        榜单条目历史中的一个快照点。快照按物化批次产生，`bucket` 参数会把同一桶内
+        的多个快照降采样为最后一个（最接近桶末）的取值。
+      required:
+        - at
+        - score
+        - solved_count
+      properties:
+        at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        rank:
+          type:
+            - integer
+            - 'null'
+          description: 该快照时刻的名次；该批次未记录名次时为 `null`。
+        score:
+          type: number
+          description: 该快照时刻的分值。
+        solved_count:
+          type: integer
+          minimum: 0
+          description: 该快照时刻的累计解题数。
+        rating:
+          type:
+            - integer
+            - 'null'
+          description: 该快照时刻的 rating；该批次无 rating 时为 `null`。
+      examples:
+        - at: '2024-05-06T07:00:00.000Z'
+          rank: 3
+          score: 812
+          solved_count: 812
+          rating: 1873
+
+    ScoreboardEntryHistory:
+      type: object
+      description: |
+        单个榜单条目的历史序列。序列来自历史物化快照，只能回溯到保留期内的批次；
+        更早的数据不会返回，也不会报错。
+      required:
+        - entry_id
+        - scoreboard_id
+        - points
+        - window
+      properties:
+        entry_id:
+          $ref: './common.yaml#/components/schemas/Id'
+        scoreboard_id:
+          $ref: './common.yaml#/components/schemas/Id'
+        points:
+          type: array
+          description: 按 `at` 升序排列的快照点；窗口内无快照时为空数组。
+          items:
+            $ref: '#/components/schemas/ScoreboardHistoryPoint'
+        window:
+          type: object
+          description: 服务端解析后实际生效的时间窗口，含默认值。
+          required:
+            - from
+            - to
+          properties:
+            from:
+              $ref: './common.yaml#/components/schemas/Timestamp'
+            to:
+              $ref: './common.yaml#/components/schemas/Timestamp'
+      examples:
+        - entry_id: sbe_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+          scoreboard_id: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          points:
+            - at: '2024-03-01T00:00:00.000Z'
+              rank: 5
+              score: 744
+              solved_count: 744
+              rating: 1801
+            - at: '2024-05-06T07:00:00.000Z'
+              rank: 3
+              score: 812
+              solved_count: 812
+              rating: 1873
+          window:
+            from: '2024-02-06T00:00:00.000Z'
+            to: '2024-05-06T07:00:00.000Z'
+
+    # ================================================================ 统计
+    StatsQueryEcho:
+      type: object
+      description: |
+        服务端回显的**解析后**查询：默认值、时区、时间窗口与分组方式都已补齐，
+        客户端不必自己猜默认值。字段与请求参数同名；未提供给该端点的维度会被省略。
+      required:
+        - scope
+      properties:
+        scope:
+          $ref: '#/components/schemas/ScoreboardScope'
+        clubs:
+          type: array
+          description: 生效的社团过滤；未指定时为空数组，表示不限社团。
+          items:
+            $ref: './identity.yaml#/components/schemas/ClubCode'
+        judges:
+          type: array
+          description: 生效的平台过滤；未指定时为全部已启用平台。
+          items:
+            $ref: './common.yaml#/components/schemas/Judge'
+        team_ids:
+          type: array
+          description: 生效的队伍过滤。
+          items:
+            $ref: './common.yaml#/components/schemas/Id'
+        enrollment_years:
+          type: array
+          description: 生效的入学年份过滤。
+          items:
+            type: integer
+        labels:
+          type: array
+          description: 生效的标签过滤。
+          items:
+            $ref: './identity.yaml#/components/schemas/Label'
+        principal_id:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Id'
+            - type: 'null'
+          description: 生效的主体过滤；未指定时为 `null`。
+        handle:
+          type:
+            - string
+            - 'null'
+          description: 生效的 OJ 账号过滤；未指定时为 `null`。
+        from:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 生效的窗口起点（已按 `timezone` 对齐桶边界）；无下界时为 `null`。
+        to:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 生效的窗口终点，不含；无上界时为 `null`。
+        timezone:
+          type: string
+          default: Asia/Shanghai
+          description: 聚合切桶与按日归并所用的 IANA 时区。
+          examples:
+            - Asia/Shanghai
+        bucket:
+          $ref: '#/components/schemas/TrendBucket'
+        group_by:
+          $ref: '#/components/schemas/StatsGroupBy'
+        unit:
+          $ref: '#/components/schemas/HeatmapUnit'
+        metric:
+          type: string
+          description: |
+            解析后的指标名：trend 端点为 `TrendMetric`，histogram 端点为
+            `HistogramMetric`；其它端点省略本字段。
+          examples:
+            - solved_count
+      examples:
+        - scope: individual
+          judges:
+            - codeforces
+          from: '2024-02-06T00:00:00.000Z'
+          to: '2024-05-06T00:00:00.000Z'
+          timezone: Asia/Shanghai
+          bucket: day
+          group_by: judge
+          metric: solved_count
+
+    TrendPoint:
+      type: object
+      description: |
+        trend 序列中的一个桶。`bucket_start`/`bucket_end` 是 UTC 时刻，
+        bucket 边界按查询的 `timezone` 切分；`label` 供直接展示。
+      required:
+        - bucket_start
+        - bucket_end
+        - value
+      properties:
+        bucket_start:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        bucket_end:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        value:
+          type: number
+          description: 该桶的指标值；`acceptance_rate` 为 0..1 的小数。
+        sample_size:
+          type: integer
+          minimum: 0
+          description: 参与该桶计算的主体数（或提交数，视 `metric` 而定）；无样本时为 `0`。
+        label:
+          type: string
+          description: 展示用短标签，如 `05-06`，按 `timezone` 生成。
+          examples:
+            - 05-06
+      examples:
+        - bucket_start: '2024-05-05T16:00:00.000Z'
+          bucket_end: '2024-05-06T16:00:00.000Z'
+          value: 37
+          sample_size: 12
+          label: 05-06
+
+    TrendGroup:
+      type: object
+      description: |
+        一个分组的时间序列。`group_by=none` 时恰有一组，`key` 为 `all`、`label` 为
+        `全部`；其它分组维度下 `key` 是分组取值（平台名、队伍 id、入学年份、标签）。
+      required:
+        - key
+        - label
+        - points
+        - series_summary
+      properties:
+        key:
+          type: string
+          description: 分组键；不分组时为 `all`。
+          examples:
+            - codeforces
+        label:
+          type: string
+          description: 分组的人类可读名称。
+          examples:
+            - Codeforces
+        points:
+          type: array
+          description: 按 `bucket_start` 升序排列的桶；无数据的桶不补齐。
+          items:
+            $ref: '#/components/schemas/TrendPoint'
+        series_summary:
+          type: object
+          description: 该组在整个窗口内的汇总值，避免客户端自行累加。
+          required:
+            - total
+            - average
+            - max
+            - min
+            - last
+          properties:
+            total:
+              type: number
+              description: 各桶求和；`acceptance_rate`/`rating` 类指标为各桶均值之和。
+            average:
+              type: number
+              description: 各桶算术平均。
+            max:
+              type: number
+              description: 各桶最大值。
+            min:
+              type: number
+              description: 各桶最小值。
+            last:
+              type: number
+              description: 最后一个有数据桶的值。
+      examples:
+        - key: codeforces
+          label: Codeforces
+          points:
+            - bucket_start: '2024-05-05T16:00:00.000Z'
+              bucket_end: '2024-05-06T16:00:00.000Z'
+              value: 37
+              sample_size: 12
+              label: 05-06
+          series_summary:
+            total: 512
+            average: 5.68
+            max: 41
+            min: 0
+            last: 37
+
+    StatsTrendResponse:
+      type: object
+      description: |
+        trend 统计结果。数据来自物化聚合，`generated_at` 是物化时刻、`stale` 表示
+        是否落后于采集写入；落后超过 `PT1H` 上界时服务端应重建该统计。
+      required:
+        - query
+        - groups
+        - generated_at
+      properties:
+        query:
+          $ref: '#/components/schemas/StatsQueryEcho'
+        groups:
+          type: array
+          description: 分组序列；`group_by=none` 时只有一个 `key=all` 的组。
+          items:
+            $ref: '#/components/schemas/TrendGroup'
+        generated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        stale:
+          type: boolean
+          description: 为 `true` 时该统计已超过 `PT1H` 新鲜度上界，应触发重建后再读。
+      examples:
+        - query:
+            scope: individual
+            judges:
+              - codeforces
+            from: '2024-02-06T00:00:00.000Z'
+            to: '2024-05-06T00:00:00.000Z'
+            timezone: Asia/Shanghai
+            bucket: day
+            group_by: judge
+            metric: solved_count
+          groups:
+            - key: codeforces
+              label: Codeforces
+              points:
+                - bucket_start: '2024-05-05T16:00:00.000Z'
+                  bucket_end: '2024-05-06T16:00:00.000Z'
+                  value: 37
+                  sample_size: 12
+                  label: 05-06
+              series_summary:
+                total: 512
+                average: 5.68
+                max: 41
+                min: 0
+                last: 37
+          generated_at: '2024-05-06T07:00:00.000Z'
+          stale: false
+
+    HeatmapDay:
+      type: object
+      description: |
+        热力图中的一天，按查询 `timezone` 归日。`value` 是 `unit` 口径的取值，
+        `level` 是按 `level_thresholds` 计算出的 0..4 展示等级。
+      required:
+        - date
+        - value
+        - level
+      properties:
+        date:
+          $ref: './common.yaml#/components/schemas/Date'
+        value:
+          type: integer
+          minimum: 0
+          description: 该日 `unit` 口径的取值。
+        level:
+          type: integer
+          minimum: 0
+          maximum: 4
+          enum:
+            - 0
+            - 1
+            - 2
+            - 3
+            - 4
+          description: |
+            展示等级：`0` 表示无数据，`1..4` 由 `summary.level_thresholds` 的四个
+            分位阈值判定（`value < t1 → 1`，`t1 ≤ value < t2 → 2`，依此类推）。
+        submissions:
+          type: integer
+          minimum: 0
+          description: 该日提交数；与 `value` 不同口径时一并返回，便于 tooltip 展示。
+        accepted:
+          type: integer
+          minimum: 0
+          description: 该日通过数。
+      examples:
+        - date: '2024-05-06'
+          value: 12
+          level: 3
+          submissions: 12
+          accepted: 7
+
+    HeatmapSummary:
+      type: object
+      description: |
+        热力图整体汇总。`level_thresholds` 是长度为 4 的升序分位阈值数组，
+        完整定义了 `HeatmapDay.level` 的判定依据；`first_date`/`last_date` 是窗口内
+        首/末个有数据的日期，全窗口无数据时为 `null`。
+      required:
+        - total
+        - max_day_value
+        - active_days
+        - level_thresholds
+      properties:
+        total:
+          type: integer
+          minimum: 0
+          description: 窗口内所有天 `value` 之和。
+        max_day_value:
+          type: integer
+          minimum: 0
+          description: 单日最大 `value`；用于展示峰值。
+        active_days:
+          type: integer
+          minimum: 0
+          description: '`value > 0` 的天数。'
+        longest_streak:
+          type: integer
+          minimum: 0
+          description: 窗口内最长连续活跃天数。
+        current_streak:
+          type: integer
+          minimum: 0
+          description: 截至窗口末日，含的连续活跃天数。
+        first_date:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Date'
+            - type: 'null'
+          description: 首个有数据的日期；全窗口无数据时为 `null`。
+        last_date:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Date'
+            - type: 'null'
+          description: 最后一个有数据的日期；全窗口无数据时为 `null`。
+        level_thresholds:
+          type: array
+          description: |
+            长度为 4 的升序分位阈值 `[t1, t2, t3, t4]`，用于把 `value` 映射为
+            0..4 的 `level`；服务端按窗口内非零取值计算。
+          minItems: 4
+          maxItems: 4
+          items:
+            type: integer
+            minimum: 0
+      examples:
+        - total: 4210
+          max_day_value: 48
+          active_days: 297
+          longest_streak: 46
+          current_streak: 3
+          first_date: '2023-05-08'
+          last_date: '2024-05-06'
+          level_thresholds:
+            - 3
+            - 9
+            - 20
+            - 35
+
+    StatsHeatmapResponse:
+      type: object
+      description: |
+        热力图结果（日粒度）。按 `timezone` 把提交时刻归入日历日，跨时区边界不会
+        被重复或漏计。数据来自物化聚合，`generated_at`/`stale` 表示物化时刻与新鲜度；
+        落后超过 `PT1H` 上界时应触发重建。
+      required:
+        - query
+        - timezone
+        - unit
+        - days
+        - summary
+        - generated_at
+      properties:
+        query:
+          $ref: '#/components/schemas/StatsQueryEcho'
+        timezone:
+          type: string
+          description: 实际生效的时区，与 `query.timezone` 一致，便于不解包直接使用。
+          examples:
+            - Asia/Shanghai
+        unit:
+          $ref: '#/components/schemas/HeatmapUnit'
+        days:
+          type: array
+          description: |
+            窗口内每一天，含无数据的 `value=0` 天，按 `date` 升序排列，
+            与请求窗口的日历日一一对应。
+          items:
+            $ref: '#/components/schemas/HeatmapDay'
+        summary:
+          $ref: '#/components/schemas/HeatmapSummary'
+        generated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        stale:
+          type: boolean
+          description: 为 `true` 时该统计已超过 `PT1H` 新鲜度上界，应触发重建后再读。
+      examples:
+        - query:
+            scope: individual
+            unit: submissions
+            timezone: Asia/Shanghai
+            from: '2023-05-07T00:00:00.000Z'
+            to: '2024-05-06T00:00:00.000Z'
+          timezone: Asia/Shanghai
+          unit: submissions
+          days:
+            - date: '2024-05-06'
+              value: 12
+              level: 3
+              submissions: 12
+              accepted: 7
+          summary:
+            total: 4210
+            max_day_value: 48
+            active_days: 297
+            longest_streak: 46
+            current_streak: 3
+            first_date: '2023-05-08'
+            last_date: '2024-05-06'
+            level_thresholds:
+              - 3
+              - 9
+              - 20
+              - 35
+          generated_at: '2024-05-06T07:00:00.000Z'
+          stale: false
+
+    HistogramBin:
+      type: object
+      description: |
+        等宽直方图的一个箱，区间为 `[lower, upper)`；**最后一箱右闭**
+        `[lower, upper]`，以保证最大值被计入。`ratio` 为该箱占比（0..1）。
+      required:
+        - lower
+        - upper
+        - count
+        - ratio
+        - label
+      properties:
+        lower:
+          type: number
+          description: 箱下界，含。
+        upper:
+          type: number
+          description: 箱上界（最后一箱含，其余不含）。
+        count:
+          type: integer
+          minimum: 0
+          description: 落入该箱的样本数。
+        ratio:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: 该箱样本数占全部样本的比例。
+        label:
+          type: string
+          description: 展示用区间标签，如 `0–100`。
+          examples:
+            - 0–100
+      examples:
+        - lower: 0
+          upper: 100
+          count: 23
+          ratio: 0.168
+          label: 0–100
+
+    DistributionStats:
+      type: object
+      description: |
+        分布描述统计量。`count` 为参与统计的样本数；分位数使用线性插值，
+        样本不足时为 `0`。
+      required:
+        - count
+        - min
+        - max
+        - mean
+        - median
+      properties:
+        count:
+          type: integer
+          minimum: 0
+          description: 样本数；为 `0` 时其余字段均为 `0`。
+        min:
+          type: number
+          description: 最小值。
+        max:
+          type: number
+          description: 最大值。
+        mean:
+          type: number
+          description: 算术平均值。
+        median:
+          type: number
+          description: 中位数（p50）。
+        p90:
+          type: number
+          description: 第 90 百分位。
+        p99:
+          type: number
+          description: 第 99 百分位。
+        stddev:
+          type: number
+          description: 总体标准差。
+      examples:
+        - count: 137
+          min: 3
+          max: 2841
+          mean: 412.6
+          median: 233
+          p90: 1102
+          p99: 2604
+          stddev: 401.2
+
+    StatsHistogramResponse:
+      type: object
+      description: |
+        直方图结果。`bins` 为等宽分箱（`[lower, upper)`，最后一箱右闭），
+        `stats` 为同一批样本的分布统计量。数据来自物化聚合，
+        `generated_at`/`stale` 表示物化时刻与新鲜度；落后超过 `PT1H` 上界时应触发重建。
+      required:
+        - query
+        - metric
+        - bins
+        - stats
+        - generated_at
+      properties:
+        query:
+          $ref: '#/components/schemas/StatsQueryEcho'
+        metric:
+          $ref: '#/components/schemas/HistogramMetric'
+        bins:
+          type: array
+          description: 按 `lower` 升序排列的箱；样本为 0 时返回空数组。
+          items:
+            $ref: '#/components/schemas/HistogramBin'
+        stats:
+          $ref: '#/components/schemas/DistributionStats'
+        generated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        stale:
+          type: boolean
+          description: 为 `true` 时该统计已超过 `PT1H` 新鲜度上界，应触发重建后再读。
+      examples:
+        - query:
+            scope: individual
+            metric: solved_count
+            timezone: Asia/Shanghai
+          metric: solved_count
+          bins:
+            - lower: 0
+              upper: 100
+              count: 23
+              ratio: 0.168
+              label: 0–100
+            - lower: 100
+              upper: 200
+              count: 31
+              ratio: 0.226
+              label: 100–200
+          stats:
+            count: 137
+            min: 3
+            max: 2841
+            mean: 412.6
+            median: 233
+            p90: 1102
+            p99: 2604
+            stddev: 401.2
+          generated_at: '2024-05-06T07:00:00.000Z'
+          stale: false
+
+    StatsSummaryResponse:
+      type: object
+      description: |
+        面板总览统计：成员规模与活跃度、OJ 覆盖、各平台 rating 分布与队伍数量。
+        数据来自物化聚合，`generated_at`/`stale` 表示物化时刻与新鲜度；
+        落后超过 `PT1H` 上界时应触发重建。
+      required:
+        - generated_at
+        - stale
+        - members
+        - oj
+        - ratings
+        - teams
+      properties:
+        generated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        stale:
+          type: boolean
+          description: 为 `true` 时该统计已超过 `PT1H` 新鲜度上界，应触发重建后再读。
+        members:
+          type: object
+          description: 成员规模与活跃度分档，按最近一次采集到的最后提交时间计算。
+          required:
+            - total
+            - active_30d
+            - dormant_90d
+            - inactive_365d
+            - by_club
+          properties:
+            by_club:
+              type: array
+              description: |
+                按社团拆分的人数，用于分别展示两个社团的规模与活跃度。
+                同时注册两个社团的人在两边都会计入，因此各社团之和可能大于 `total`。
+              items:
+                type: object
+                required:
+                  - club
+                  - total
+                  - active_30d
+                  - dormant_90d
+                  - inactive_365d
+                properties:
+                  club:
+                    $ref: './identity.yaml#/components/schemas/ClubCode'
+                  total:
+                    type: integer
+                    minimum: 0
+                    description: 该社团的在册人数。
+                  active_30d:
+                    type: integer
+                    minimum: 0
+                    description: 该社团中最近 30 天活跃过的人数。
+                  dormant_90d:
+                    type: integer
+                    minimum: 0
+                    description: 该社团中 90 天内有活跃但最近 30 天没有的人数。
+                  inactive_365d:
+                    type: integer
+                    minimum: 0
+                    description: 该社团中超过 365 天未活跃的人数。
+              examples:
+                - - club: acm_icpc
+                    total: 74
+                    active_30d: 41
+                    dormant_90d: 12
+                    inactive_365d: 6
+                  - club: safewind_software
+                    total: 88
+                    active_30d: 29
+                    dormant_90d: 15
+                    inactive_365d: 11
+            total:
+              type: integer
+              minimum: 0
+              description: 成员总数。
+            active_30d:
+              type: integer
+              minimum: 0
+              description: 最近 30 天内有提交的成员数。
+            dormant_90d:
+              type: integer
+              minimum: 0
+              description: 超过 90 天未活跃的成员数。
+            inactive_365d:
+              type: integer
+              minimum: 0
+              description: 超过 365 天未活跃的成员数（成员名单导出默认排除的集合）。
+        oj:
+          type: object
+          description: OJ 绑定与采集覆盖情况。
+          required:
+            - linked_handles
+            - solved_total
+            - submissions_30d
+            - active_handles_30d
+          properties:
+            linked_handles:
+              type: integer
+              minimum: 0
+              description: 已绑定且归属校验通过的 OJ 账号数。
+            solved_total:
+              type: integer
+              minimum: 0
+              description: 全部绑定账号的累计解题数之和。
+            submissions_30d:
+              type: integer
+              minimum: 0
+              description: 最近 30 天采集到的提交数。
+            active_handles_30d:
+              type: integer
+              minimum: 0
+              description: 最近 30 天有提交的账号数。
+        ratings:
+          type: object
+          description: 分平台 rating 分布。
+          required:
+            - judges
+          properties:
+            judges:
+              type: array
+              description: 按平台列出；无样本的平台不出现。
+              items:
+                type: object
+                required:
+                  - judge
+                  - max
+                  - avg
+                  - count
+                properties:
+                  judge:
+                    $ref: './common.yaml#/components/schemas/Judge'
+                  max:
+                    type:
+                      - integer
+                      - 'null'
+                    description: 该平台最高 rating；无样本时为 `null`。
+                  avg:
+                    type:
+                      - number
+                      - 'null'
+                    description: 该平台平均 rating；无样本时为 `null`。
+                  count:
+                    type: integer
+                    minimum: 0
+                    description: 该平台有 rating 的账号数。
+        teams:
+          type: object
+          description: 队伍规模。
+          required:
+            - total
+            - active
+          properties:
+            total:
+              type: integer
+              minimum: 0
+              description: 队伍总数。
+            active:
+              type: integer
+              minimum: 0
+              description: 最近 30 天内有成员活跃的队伍数。
+      examples:
+        - generated_at: '2024-05-06T07:00:00.000Z'
+          stale: false
+          members:
+            by_club:
+              - club: acm_icpc
+                total: 74
+                active_30d: 41
+                dormant_90d: 12
+                inactive_365d: 6
+              - club: safewind_software
+                total: 88
+                active_30d: 29
+                dormant_90d: 15
+                inactive_365d: 11
+            total: 138
+            active_30d: 64
+            dormant_90d: 21
+            inactive_365d: 9
+          oj:
+            linked_handles: 226
+            solved_total: 58214
+            submissions_30d: 3120
+            active_handles_30d: 118
+          ratings:
+            judges:
+              - judge: codeforces
+                max: 2410
+                avg: 1432.7
+                count: 96
+              - judge: atcoder
+                max: 2102
+                avg: 1188.4
+                count: 74
+          teams:
+            total: 18
+            active: 11

@@ -1,0 +1,76 @@
+components:
+  schemas:
+    SyncResource:
+      type: string
+      description: |
+        可增量同步的资源集合名，取值与 `ResourceChange.resource` 完全一致。
+        客户端按资源集合维护本地副本；服务端保证同一 id 的变更按 `revision`
+        单调递增发布。
+      enum:
+        - members
+        - teams
+        - oj-handles
+        - scoreboards
+        - announcements
+        - quotas
+        - channels
+        - config
+      examples:
+        - members
+
+    ChangeFeed:
+      type: object
+      description: |
+        一段连续的增量变更流。`changes` 按服务端提交顺序，等价于
+        `(updated_at, id)` 的稳定顺序返回，可直接顺序应用。
+
+        游标语义：`cursor` 与 `changes` 中**最后一条**变更对应，客户端原样回传作为
+        下一次请求的 `since` 即可续拉；服务端保证同一游标重放不会跳过、
+        也不会重复已确认返回的变更。`has_more` 为 `true` 表示还有更多变更，
+        应立即用返回的 `cursor` 继续请求。
+
+        `retention` 是变更的保留期：若客户端持有的游标早于保留窗口，
+        请求返回 `410 cursor_expired`，此时必须重新基线化
+        （发送省略 `since` 的握手请求 + 对相关资源做一次全量拉取）。
+      required:
+        - changes
+        - cursor
+        - has_more
+        - server_time
+        - retention
+      properties:
+        changes:
+          type: array
+          description: 变更列表；只含元信息，正文由客户端按 `resource` + `id` 回源。
+          items:
+            $ref: './common.yaml#/components/schemas/ResourceChange'
+        cursor:
+          type: string
+          description: |
+            不透明游标，指向 `changes` 的最后一条变更；原样回传作为下一次的 `since`。
+            `changes` 为空时它是"当前游标"，可用于建立基线。
+        has_more:
+          type: boolean
+          description: 是否还有更多变更可拉取；为 `true` 时应立即用 `cursor` 续拉。
+        server_time:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+          description: 生成该响应时的服务端时刻，用于计算时钟偏移与判断保留期。
+        retention:
+          $ref: './common.yaml#/components/schemas/Duration'
+          description: 变更保留期，默认 `P30D`；早于该窗口的游标会得到 `410 cursor_expired`。
+      examples:
+        - changes:
+            - resource: members
+              id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              op: upsert
+              revision: '17'
+              updated_at: '2024-05-06T07:08:09.123Z'
+            - resource: teams
+              id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              op: delete
+              revision: '4'
+              updated_at: '2024-05-06T07:08:10.000Z'
+          cursor: eyJ0IjoiMjAyNC0wNS0wNlQwNzowODoxMC4wMDBaIiwiaWQiOiJ0ZWFtXzAxSjhaNVY2UTBLM003TjlQMlI0VDZXOFgwIn0
+          has_more: false
+          server_time: '2024-05-06T07:08:11.000Z'
+          retention: P30D

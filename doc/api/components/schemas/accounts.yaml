@@ -1,0 +1,451 @@
+components:
+  schemas:
+    # --------------------------------------------------------------- 账号写入
+    CreateAccountRequest:
+      type: object
+      description: |
+        创建主体（`human` 自然人或 `service` 机器人/采集器/Agent）的请求体。
+
+        **唯一性**：`username` 全局唯一（大小写不敏感），`profile.student_id` 全局唯一；
+        任一冲突返回 `409 conflict`，并在 `detail` 中指出冲突字段。
+
+        **口令**：`password` 仅对 `kind: human` 有意义；`service` 主体不设口令，
+        提交该字段返回 `422 validation_failed`（`errors[].pointer=/password`）。
+        省略 `password` 时账号仍会创建，但在设置口令前无法通过 `/auth/login` 登录。
+
+        **权限**：需要 `account:manage`。`scopes` 不得超过调用者自身拥有的 scope，
+        否则返回 `403 insufficient_scope`。新建主体初始 `revision` 为 `"1"`，
+        `created_at`、`updated_at` 取同一时刻。
+      required:
+        - username
+        - display_name
+        - kind
+      properties:
+        username:
+          type: string
+          description: |
+            人类主体填登录名，service 主体填标识名；创建后不可修改。
+            只允许小写字母、数字与 `._-`，必须字母或数字开头。
+          minLength: 3
+          maxLength: 32
+          pattern: '^[a-z0-9][a-z0-9._-]*$'
+          examples:
+            - alice
+        display_name:
+          type: string
+          description: 展示名，可含中文；与 `username` 不同，可随时修改。
+          minLength: 1
+          maxLength: 64
+          examples:
+            - 张三
+        kind:
+          $ref: './common.yaml#/components/schemas/PrincipalKind'
+        labels:
+          allOf:
+            - $ref: './identity.yaml#/components/schemas/LabelSet'
+          description: |
+            初始标签集合，省略时为空。标签不授予任何权限，**也不决定成员资格**：
+            成员资格来自社团注册记录，用 `PUT /members/{member_id}/clubs` 维护。
+        template:
+          type: string
+          description: |
+            套用预置的 scope 模板，模板定义在 `Config.accounts.templates`。
+            与 `scopes` **互斥**：给 `template` 就用模板里的集合，给 `scopes` 就直接用
+            那份列表；两者同时出现返回 `422 validation_failed`。都不给则套用
+            `Config.accounts.default_template`。
+          examples:
+            - user
+        scopes:
+          allOf:
+            - $ref: './identity.yaml#/components/schemas/ScopeSet'
+          description: |
+            初始 scope 列表。省略时为空（`service` 主体通常至少需要 `account:self`）。
+            服务端会去重；请求者不得授予自己不具备的 scope。
+        profile:
+          $ref: './identity.yaml#/components/schemas/PrincipalProfileWrite'
+        password:
+          type: string
+          format: password
+          writeOnly: true
+          minLength: 12
+          maxLength: 256
+          description: |
+            初始口令明文，仅经 TLS 传输，服务端以 Argon2id 存哈希。
+            仅 `kind: human` 允许；至少 12 字符。
+        status:
+          allOf:
+            - $ref: './identity.yaml#/components/schemas/AccountStatus'
+          description: |
+            初始状态，默认 `active`。以 `disabled` 创建等价于先建后停用：
+            主体可被成员与榜单引用，但无任何有效凭证。
+      examples:
+        - username: alice
+          display_name: 张三
+          kind: human
+          labels:
+            - member
+            - '2022'
+          scopes:
+            - account:self
+            - member:read
+            - oj:read
+          profile:
+            student_id: '2220210000'
+            enrollment_year: 2022
+            major: 计算机科学与技术
+          password: correct-horse-battery-staple
+          status: active
+
+    UpdateAccountRequest:
+      type: object
+      description: |
+        修改主体的请求体，字段全部可选，但至少出现一个（否则 `422 validation_failed`）。
+
+        **语义**：`display_name` 与 `status` 为整体替换；`profile` 为**合并式更新**——
+        只覆盖出现的字段，显式传 `null` 表示清空该字段。
+
+        **状态机**：只允许 `active ⇄ disabled`。把 `status` 置为 `disabled` 会**同时撤销
+        该主体的全部凭证**（`session` 与 `api_key`），并使正在进行的会话在下一次请求时
+        收到 `401 invalid_token`（传播延迟 ≤ 60 秒）。禁止把自己停用（`409 conflict`）。
+        `disabled → active` 只恢复主体本身，**不会**恢复已撤销的凭证。
+
+        **权限**：需要 `account:manage`；`username`、`kind`、`labels`、`scopes` 不在本
+        请求体内，分别由创建流程与 `PUT /accounts/{account_id}/labels|scopes` 管理。
+      minProperties: 1
+      properties:
+        display_name:
+          type: string
+          description: 新的展示名。
+          minLength: 1
+          maxLength: 64
+          examples:
+            - 张三（队长）
+        profile:
+          $ref: './identity.yaml#/components/schemas/PrincipalProfileWrite'
+        status:
+          allOf:
+            - $ref: './identity.yaml#/components/schemas/AccountStatus'
+          description: |
+            目标状态。置为 `disabled` 会撤销该主体全部凭证；置为 `active` 仅恢复主体，
+            不恢复任何凭证。非法迁移，例如对已停用主体重复置为 `disabled`是幂等的，
+            返回 `200` 而非错误。
+      examples:
+        - display_name: 张三（队长）
+          profile:
+            major: 软件工程
+          status: active
+
+    SetLabelsRequest:
+      type: object
+      description: |
+        以**替换语义**设置主体标签：请求体中的 `labels` 成为该主体的完整标签集合，
+        未出现的旧标签会被删除。传入空数组即清空全部标签。
+
+        标签不授予权限，也不决定成员资格——成员资格只看社团注册记录。因此增删标签
+        不会改变任何人是否出现在成员名单或导出结果里。`labels` 内部重复项会被服务端
+        去重后保存。
+      required:
+        - labels
+      properties:
+        labels:
+          $ref: './identity.yaml#/components/schemas/LabelSet'
+      examples:
+        - labels:
+            - member
+            - '2022'
+            - team-captain
+
+    SetScopesRequest:
+      type: object
+      description: |
+        以**替换语义**设置主体 scope：请求体中的 `scopes` 成为该主体的完整 scope 列表，
+        未出现的旧 scope 会被撤销。传入空数组即撤销全部 scope（`account:self` 也一并
+        撤销，该主体将无法再自助操作）。
+
+        **权限**：调用者需要 `member:assign`，且**不得授予自己不具备的 scope**
+        （返回 `403 insufficient_scope`，`detail` 列出超出的 scope）；通配 `*` 只能由
+        已持有 `*` 的主体授予。变更对**新签发**的凭证立即生效；已签发凭证的实际生效
+        权限取「主体 scopes ∩ 凭证 scopes」，因此缩减主体 scopes 会立即缩小既有凭证的
+        有效权限（强一致，无传播延迟）。
+      required:
+        - scopes
+      properties:
+        scopes:
+          $ref: './identity.yaml#/components/schemas/ScopeSet'
+      examples:
+        - scopes:
+            - account:self
+            - member:read
+            - oj:read
+            - oj:write
+
+    IssueCredentialRequest:
+      type: object
+      description: |
+        为主体签发新凭证（`session` 或 `api_key`）。明文 `secret` **只在 201 响应中
+        出现一次**，服务端只保存哈希。
+
+        **scope 继承**：省略 `scopes` 时，新凭证的 scopes 取
+        「主体 scopes ∩ 请求者 scopes」；显式给出 `scopes` 时不得超出请求者自身的
+        scopes，否则 `403 insufficient_scope`。
+
+        **有效期**：`expires_at` 与 `expires_in` 互斥，同时给出返回
+        `422 validation_failed`；两者都省略时，`api_key` 不过期，`session` 使用服务端
+        默认值（30 天）。
+      required:
+        - kind
+        - name
+      properties:
+        kind:
+          $ref: './identity.yaml#/components/schemas/CredentialKind'
+        name:
+          type: string
+          description: 人类可读的用途说明，写入凭证的 `name`，便于在列表中识别与撤销。
+          minLength: 1
+          maxLength: 64
+          examples:
+            - cf-crawler
+        scopes:
+          allOf:
+            - $ref: './identity.yaml#/components/schemas/ScopeSet'
+          description: |
+            凭证自身的 scope 列表。省略时继承「主体 scopes ∩ 请求者 scopes」；
+            实际生效权限始终是它与主体 scopes 的交集，因此可安全地按最小权限签发。
+        expires_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: |
+            绝对过期时刻（UTC）。与 `expires_in` 互斥。`null` 表示不过期，
+            仅 `kind: api_key` 允许（`session` 必须有有效期）。
+        expires_in:
+          type: integer
+          minimum: 60
+          maximum: 31536000
+          description: |
+            相对有效期（秒），从签发时刻起算，服务端换算为 `expires_at` 落库。
+            与 `expires_at` 互斥。
+          examples:
+            - 7776000
+        description:
+          type: string
+          description: 备注，仅用于审计与人读，不参与鉴权。
+          maxLength: 500
+          examples:
+            - 用于 Codeforces 每日采集，只读
+      examples:
+        - kind: api_key
+          name: cf-crawler
+          scopes:
+            - oj:read
+            - ingest:write
+          expires_in: 7776000
+          description: 用于 Codeforces 每日采集，只读 OJ 数据并上报采集结果
+
+    # ----------------------------------------------------------------- 列表页
+    PagedPrincipal:
+      type: object
+      description: |
+        主体列表的分页响应：`PageMeta` 的偏移分页元信息 + `items`。
+        `total` 是满足过滤条件的总数（与 `page` 无关）；`page` 越界时 `items` 为空数组
+        且 `has_next` 为 `false`，而不是 `404`。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/PageMeta'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页的主体，按请求的 `sort`/`order` 排序。
+              items:
+                $ref: './identity.yaml#/components/schemas/Principal'
+      examples:
+        - page: 1
+          size: 20
+          total: 137
+          has_next: true
+          items:
+            - id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              username: alice
+              display_name: 张三
+              kind: human
+              labels:
+                - member
+                - '2022'
+              scopes:
+                - account:self
+                - member:read
+              status: active
+              last_active_at: '2024-05-06T07:08:09.123Z'
+              created_at: '2023-09-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:08:09.123Z'
+              revision: '17'
+
+    PagedCredential:
+      type: object
+      description: |
+        凭证列表的分页响应：`PageMeta` + `items`。条目**永不包含明文密钥**，
+        只有 `prefix` 可作人工比对；判断是否失效看 `revoked_at` 与 `expires_at`。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/PageMeta'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页的凭证元信息，按 `created_at` 倒序（新签发的在前）。
+              items:
+                $ref: './identity.yaml#/components/schemas/Credential'
+      examples:
+        - page: 1
+          size: 20
+          total: 2
+          has_next: false
+          items:
+            - id: cred_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              kind: api_key
+              name: qq-bot
+              prefix: xcp_7f3a
+              scopes:
+                - announcement:write
+              created_at: '2024-01-02T03:04:05.000Z'
+              expires_at: null
+              last_used_at: '2024-05-06T07:00:00.000Z'
+              revoked_at: null
+
+    PagedOjHandle:
+      type: object
+      description: |
+        OJ 绑定列表的分页响应：`PageMeta` + `items`，条目为 `OjHandle`
+        （定义见 `components/schemas/oj_data.yaml`）。
+
+        列表按主体可见性规则裁剪：`verification_token` 属敏感字段，仅在
+        「本人」或「持有 `oj:manage`」时返回，其余情况一律为 `null`。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/PageMeta'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页的 OJ 绑定。
+              items:
+                $ref: './oj_data.yaml#/components/schemas/OjHandle'
+      examples:
+        - page: 1
+          size: 20
+          total: 3
+          has_next: false
+          items:
+            - id: ojh_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              judge: codeforces
+              judge_label: null
+              handle: alice_cf
+              profile_url: https://codeforces.com/profile/alice_cf
+              verified: true
+              verification_state: verified
+              verification_token: null
+              verified_at: '2024-02-01T10:00:00.000Z'
+              linked_at: '2024-01-31T09:00:00.000Z'
+              last_crawled_at: '2024-05-06T06:00:00.000Z'
+              last_submission_at: '2024-05-05T20:11:03.000Z'
+              summary:
+                rating: 1680
+                max_rating: 1720
+                rating_delta_30d: 12
+                solved_count: 456
+                attempted_count: 512
+                submissions_30d: 33
+                active_days_30d: 11
+                computed_at: '2024-05-06T06:00:05.000Z'
+              revision: '17'
+              updated_at: '2024-05-06T06:00:05.000Z'
+
+    # ------------------------------------------------------------- OJ 绑定写入
+    LinkOjHandleRequest:
+      type: object
+      description: |
+        把某个 OJ 账号与主体绑定。
+
+        **归属**：省略 `principal_id` 时为自助绑定（绑定到调用者自身，需要 `oj:write`）；
+        显式给出 `principal_id` 时需要 `oj:manage`，可代他人绑定。
+
+        **唯一性**：同一 `judge` 下 `handle` 全局唯一（大小写不敏感，按平台规范化后比较），
+        已被绑定时返回 `409 handle_already_linked`。解绑只解除关系、保留采集数据，
+        因此解绑后的 `(judge, handle)` 可被重新绑定。
+
+        **平台**：仅接受服务器已启用的平台，见 `GET /meta` 的 `capabilities.judges`，
+        未启用返回 `422 judge_not_supported`。
+
+        **副作用**：绑定成功后该绑定进入 `verification_state=pending`，响应中返回**仅供
+        本人或 `oj:manage` 可见**的 `verification_token`；用户需要在 OJ 主页简介/签名中
+        放置该 token，采集器随后调用 `POST /oj-handles/{handle_id}/verify` 确认归属。
+        在确认前，采集到的提交记录仍会计入该 handle，但不会计入主体统计。
+      required:
+        - judge
+        - handle
+      properties:
+        principal_id:
+          allOf:
+            - $ref: './common.yaml#/components/schemas/Id'
+          description: |
+            目标主体 id，前缀 `acc_`。省略时绑定到调用者自身；给出时必须持有
+            `oj:manage`，否则 `403 insufficient_scope`。
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        judge_label:
+          type: string
+          description: |
+            人类可读平台名，`judge: other` 时必填（否则 `422 validation_failed`）；
+            已知平台（`Judge` 枚举内的取值）可省略，响应中的 `judge_label` 为 `null`。
+          maxLength: 64
+          examples:
+            - DMOJ
+        handle:
+          type: string
+          description: |
+            平台内的账号名。长度 1..64，只允许字母、数字与 `._-`；
+            服务端按平台规则规范化后做唯一性比较。
+          minLength: 1
+          maxLength: 64
+          pattern: '^[A-Za-z0-9._-]+$'
+          examples:
+            - alice_cf
+      examples:
+        - judge: codeforces
+          handle: alice_cf
+
+    VerifyOjHandleRequest:
+      type: object
+      description: |
+        采集器确认 OJ 账号归属的请求体。`token` 必须与绑定创建时下发的
+        `verification_token` 完全一致；不一致返回 `422 validation_failed`
+        且 `errors[].pointer` 为 `/token`。
+
+        `evidence_url` 是可选的人工可核对凭据，例如含 token 的主页 URL，
+        写入审计日志，不参与自动校验。
+      required:
+        - token
+      properties:
+        token:
+          type: string
+          description: 绑定创建时返回的归属校验 token，采集器在 OJ 主页/签名中读到它后原样回传。
+          minLength: 8
+          maxLength: 128
+          examples:
+            - xcv_7f3aQ0K3M7N9P2R4T6W8X0
+        evidence_url:
+          type: string
+          format: uri
+          description: 可选的人工证据地址，例如 https://codeforces.com/profile/alice_cf。
+          maxLength: 512
+          examples:
+            - https://codeforces.com/profile/alice_cf
+      examples:
+        - token: xcv_7f3aQ0K3M7N9P2R4T6W8X0
+          evidence_url: https://codeforces.com/profile/alice_cf

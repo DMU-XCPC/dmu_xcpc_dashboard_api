@@ -1,0 +1,1465 @@
+components:
+  schemas:
+    # ------------------------------------------------------------- 成员活动度
+    ClubActivity:
+      type: object
+      description: |
+        某个社团身份下的活跃度切片：只统计该社团**在册期间**的登录、API 调用与 OJ
+        提交，窗口从 `registered_at` 起到 `ended_at` 或当前时刻止。
+        同一份活跃数据按社团分别切分，所以两个社团的数值通常不同——这正是
+        "单一活跃度不足以管理人员"的原因。
+      required:
+        - club
+        - status
+        - registered_at
+        - active_days
+        - submissions
+      properties:
+        club:
+          $ref: './identity.yaml#/components/schemas/ClubCode'
+        status:
+          $ref: './identity.yaml#/components/schemas/ClubMembershipStatus'
+        registered_at:
+          $ref: './common.yaml#/components/schemas/Date'
+          description: 该社团的注册日期，也是本切片的统计起点。
+        last_active_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 在册期间的最后一次活跃时刻；期间没有活跃则为 `null`。
+        active_days:
+          type: integer
+          minimum: 0
+          description: 在册期间有活跃记录的天数，按 UTC 日历日去重。
+        submissions:
+          type: integer
+          minimum: 0
+          description: 在册期间的 OJ 提交数，跨平台合计。
+      examples:
+        - club: safewind_software
+          status: active
+          registered_at: '2023-09-20'
+          last_active_at: '2024-05-06T07:08:09.123Z'
+          active_days: 46
+          submissions: 12
+        - club: acm_icpc
+          status: active
+          registered_at: '2024-03-01'
+          last_active_at: '2024-05-06T07:08:09.123Z'
+          active_days: 21
+          submissions: 84
+
+    MemberActivity:
+      type: object
+      description: |
+        成员活动度的**派生**视图（只读，不能通过写接口修改）。
+        `last_active_at` 取 `max(last_login_at, last_api_use_at, last_oj_activity_at)`：
+        登录、携带凭证的 API 调用（读操作也算）、以及该成员任一 OJ 绑定的最近一次
+        提交，三者取最晚者。
+
+        `activity_state` 由 `last_active_at` 与 `computed_at` 的差值判定：
+        ≤90 天为 `active`、≤365 天为 `dormant`、>365 天或从未活跃为 `inactive`。
+        其余 `*_30d` 字段以 `computed_at` 为基准回看 30 天。
+
+        该对象由后台汇总任务计算，属最终一致数据：`computed_at` 表示本次派生值的
+        计算时刻，可能落后于已接受的写入，滞后上界 15 分钟。
+
+        本对象是**人级**聚合。**按社团切分的口径见 `by_club`**：只统计该社团在册期间
+        的活跃，因此同一个人在两个社团的数值可以不同，管理两个社团需要分别看这份切片。
+
+        与 `Member.last_active_at` 的关系：**语义相同、时效不同**——外层字段来自主体、
+        强一致；本对象内的同名值是汇总任务的派生副本。需要精确判定"是否活跃"时用
+        外层字段；分级（`activity_state`）、窗口统计与导出排除用本对象。
+      x-consistency: eventual
+      x-freshness-bound: PT15M
+      required:
+        - last_active_at
+        - last_oj_activity_at
+        - activity_state
+        - by_club
+        - computed_at
+      properties:
+        by_club:
+          type: array
+          description: 按社团身份切分的活跃度；未注册任何社团时为空数组。
+          items:
+            $ref: '#/components/schemas/ClubActivity'
+        last_active_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: |
+            最近一次"有意义的活跃"时刻，即 `max(last_login_at, last_api_use_at,
+            last_oj_activity_at)`；三者都不存在（从未活跃）时为 `null`。
+        last_login_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 最近一次成功登录时刻；从未登录过为 `null`。
+        last_api_use_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 最近一次携带凭证调用 API 的时刻，含只读调用；从未调用为 `null`。
+        last_oj_activity_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: |
+            最近一次在该成员任一 OJ 绑定上采集到新提交的时刻；无绑定或从未采集到为 `null`。
+        activity_state:
+          type: string
+          enum:
+            - active
+            - dormant
+            - inactive
+          description: |
+            活动度分档：`active`（`last_active_at` 距今 ≤90 天）、
+            `dormant`（≤365 天）、`inactive`（>365 天或从未活跃）。
+            该字段被 `GET /members?activity_state=` 与成员名单导出的自动排除规则使用。
+          examples:
+            - active
+        active_days_30d:
+          type: integer
+          minimum: 0
+          maximum: 30
+          description: 最近 30 天内有活跃记录的天数，按 UTC 日历日去重。
+          examples:
+            - 21
+        solved_count_30d:
+          type: integer
+          minimum: 0
+          description: 最近 30 天内通过（AC）的去重题目数，跨 OJ 合并。
+          examples:
+            - 37
+        submissions_30d:
+          type: integer
+          minimum: 0
+          description: 最近 30 天内采集到的提交总数，含未通过。
+          examples:
+            - 84
+        computed_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+          description: |
+            本对象所有派生值的计算时刻。与 `last_active_at` 的差值决定
+            `activity_state`；客户端应把该时刻展示为"数据截至时间"。
+      examples:
+        - by_club:
+            - club: acm_icpc
+              status: active
+              registered_at: '2024-03-01'
+              last_active_at: '2024-05-06T07:08:09.123Z'
+              active_days: 21
+              submissions: 84
+          last_active_at: '2024-05-06T07:08:09.123Z'
+          last_login_at: '2024-05-06T07:00:00.000Z'
+          last_api_use_at: '2024-05-06T07:08:09.123Z'
+          last_oj_activity_at: '2024-05-05T18:20:00.000Z'
+          activity_state: active
+          active_days_30d: 21
+          solved_count_30d: 37
+          submissions_30d: 84
+          computed_at: '2024-05-06T07:10:00.000Z'
+
+    # --------------------------------------------------------------- 成员
+    Member:
+      description: |
+        **成员信息视图**：`Principal` 主体在"社团成员"这一视角下的**只读投影**，
+        **不是独立实体**——它没有自己的 id、没有创建/删除端点。`member_id` 就是
+        `Principal.id`，前缀为 `acc_`，**不存在 `mem_` 前缀**；`revision`/`ETag`
+        也是主体的版本号。术语与两个视角的分工见 `README.md` §3。
+
+        **社团身份是一对多记录**：集训队挂靠海风社团软件部 Safewind `safewind_software` 与
+        ACM/ICPC 学社 `acm_icpc` 两个社团，成员可以只注册其中一个，也可以两个都注册。
+        因此本视图用 `clubs` 表达"当前在哪些社团"，没有单一的"是否在册"布尔值；
+        每个社团各自的注册日期、状态与角色在 `profile.club_memberships` 里。
+        `member` 标签没有特殊含义，只是常用的组织标签，判断是否在名单里只看 `clubs`。
+        `GET /members/{member_id}` 对**任何**主体都返回本视图：`clubs: []` 只表示
+        "当前不属于任何社团"，例如两个社团都已退出或本就是机器人账号，
+        这样退队成员的历史成绩与队伍引用仍然可解析。
+
+        本结构里**成员名单专属**的字段只有 `clubs`、`activity`、`teams`、`oj_handles`；
+        `profile`、`labels`、`scopes`、`status`、`last_active_at` 等全部继承自 `Principal`，权威定义在 `identity.yaml`；与 `GET /accounts/{account_id}`
+        是**同一份数据、同一个 `ETag`**。
+
+        **注意同名不同时效**：外层 `last_active_at` 来自主体、强一致，与
+        `activity.last_active_at` 来自后台汇总、滞后 ≤15 分钟，语义相同而新鲜度不同。
+      allOf:
+        - $ref: './identity.yaml#/components/schemas/Principal'
+        - type: object
+          required:
+            - clubs
+            - activity
+            - teams
+            - oj_handles
+          properties:
+            clubs:
+              type: array
+              description: |
+                该成员**当前有效**的社团身份，即 `profile.club_memberships` 中状态为
+                `active` 的那些，按固定顺序返回；空数组表示当前不属于任何社团。
+                两个社团的名单分别看这里；模板里没有单一的"是否在册"布尔值。
+              items:
+                $ref: './identity.yaml#/components/schemas/ClubCode'
+              examples:
+                - - acm_icpc
+                  - safewind_software
+            activity:
+              $ref: '#/components/schemas/MemberActivity'
+            teams:
+              type: array
+              description: |
+                该成员在**当前赛季**（定义见 `README.md` §3 术语）所属的队伍引用，
+                同一赛季内至多一支。跨赛季的历史队伍、以及 `season` 缺失的队伍
+                都不出现在这里；查历史归属用 `GET /teams?member_id=…`。
+              items:
+                $ref: './common.yaml#/components/schemas/TeamRef'
+            oj_handles:
+              type: array
+              description: |
+                该成员绑定的 OJ 账号引用。字段固定为
+                `{id, judge, judge_label, handle, verified, latest_rating}`，
+                完整绑定信息见 `GET /oj-handles`。
+              items:
+                $ref: './oj_data.yaml#/components/schemas/OjHandleRef'
+      examples:
+        - id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          username: alice
+          display_name: 张三
+          kind: human
+          labels:
+            - member
+            - '2022'
+          scopes:
+            - account:self
+            - member:read
+          profile:
+            student_id: '2220210000'
+            enrollment_year: 2022
+            grade: 2022级
+            major: 计算机科学与技术
+            club_memberships:
+              - club: acm_icpc
+                status: active
+                registered_at: '2023-09-20'
+                role: 成员
+            email: alice@example.edu.cn
+            phone: '13800000000'
+            qq: '10001'
+          status: active
+          disabled_at: null
+          last_active_at: '2024-05-06T07:08:09.123Z'
+          created_at: '2023-09-01T02:00:00.000Z'
+          updated_at: '2024-05-06T07:08:09.123Z'
+          revision: '17'
+          clubs:
+            - acm_icpc
+            - safewind_software
+          activity:
+            by_club:
+              - club: acm_icpc
+                status: active
+                registered_at: '2024-03-01'
+                last_active_at: '2024-05-06T07:08:09.123Z'
+                active_days: 21
+                submissions: 84
+            last_active_at: '2024-05-06T07:08:09.123Z'
+            last_login_at: '2024-05-06T07:00:00.000Z'
+            last_api_use_at: '2024-05-06T07:08:09.123Z'
+            last_oj_activity_at: '2024-05-05T18:20:00.000Z'
+            activity_state: active
+            active_days_30d: 21
+            solved_count_30d: 37
+            submissions_30d: 84
+            computed_at: '2024-05-06T07:10:00.000Z'
+          teams:
+            - id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              name: DMU-1
+          oj_handles:
+            - id: ojh_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              judge: codeforces
+              judge_label: null
+              handle: alice
+              verified: true
+              latest_rating: 1834
+
+    PagedMember:
+      description: 成员的分页结果，`items` 按 `sort`/`order` 指定的键排序。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/PageMeta'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页的成员列表。
+              items:
+                $ref: '#/components/schemas/Member'
+      examples:
+        - page: 1
+          size: 20
+          total: 137
+          has_next: true
+          items:
+            - id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              username: alice
+              display_name: 张三
+              kind: human
+              labels:
+                - member
+              scopes:
+                - account:self
+              status: active
+              created_at: '2023-09-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:08:09.123Z'
+              revision: '17'
+              clubs:
+                - acm_icpc
+                - safewind_software
+              activity:
+                by_club:
+                  - club: acm_icpc
+                    status: active
+                    registered_at: '2024-03-01'
+                    last_active_at: '2024-05-06T07:08:09.123Z'
+                    active_days: 21
+                    submissions: 84
+                last_active_at: '2024-05-06T07:08:09.123Z'
+                last_login_at: '2024-05-06T07:00:00.000Z'
+                last_api_use_at: '2024-05-06T07:08:09.123Z'
+                last_oj_activity_at: '2024-05-05T18:20:00.000Z'
+                activity_state: active
+                active_days_30d: 21
+                solved_count_30d: 37
+                submissions_30d: 84
+                computed_at: '2024-05-06T07:10:00.000Z'
+              teams: []
+              oj_handles: []
+
+    # ----------------------------------------------------------- 成员写入
+    UpdateMemberRequest:
+      type: object
+      description: |
+        管理员修改成员档案的请求体，**全部字段可选**，只覆盖出现的字段。
+        `username`、`kind`、`status`、`labels`、`scopes` 不在本请求内：标签走
+        `PUT /members/{member_id}/labels`，scope 走 `PUT /members/{member_id}/scopes`，
+        社团身份走 `PUT /members/{member_id}/clubs`。
+      minProperties: 1
+      properties:
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 新的展示名。
+          examples:
+            - 张三（队长）
+        profile:
+          $ref: './identity.yaml#/components/schemas/PrincipalProfileWrite'
+          description: |
+            社团档案的**合并式**更新：只覆盖请求中出现的字段，未出现的字段保持不变。
+            `grade` 与 `club_memberships` 是只读字段，不在本结构里，提交也不会生效。
+      examples:
+        - display_name: 张三（队长）
+          profile:
+            major: 软件工程
+            phone: '13800000001'
+
+    SetMemberLabelsRequest:
+      type: object
+      description: |
+        全量替换成员的标签集合，不是增量。请求体中的列表即替换后的最终状态；
+        服务端会去重。**副作用**：只改变标签本身，不影响成员资格——`clubs` 由社团
+        注册记录决定，增删标签不会让人进入或退出名单。
+      required:
+        - labels
+      properties:
+        labels:
+          $ref: './identity.yaml#/components/schemas/LabelSet'
+          description: 替换后的完整标签集合；空数组表示清空全部标签，含 `member`。
+      examples:
+        - labels:
+            - member
+            - '2022'
+            - team-captain
+
+    SetMemberScopesRequest:
+      type: object
+      description: |
+        全量替换成员的 scope 集合，不是增量。调用者不能授予自己不持有的 scope：
+        请求中任一 scope 超出调用者自身的有效 scope 集合时，整个请求返回
+        `403 insufficient_scope`（不做部分授予）。`*` 与 `<资源>:*` 通配按展开后比较。
+      required:
+        - scopes
+      properties:
+        scopes:
+          $ref: './identity.yaml#/components/schemas/ScopeSet'
+          description: 替换后的完整 scope 集合；空数组表示回收全部权限。
+      examples:
+        - scopes:
+            - account:self
+            - member:read
+            - oj:read
+
+    # ------------------------------------------------------------------- 队伍
+    SetMemberClubsRequest:
+      type: object
+      description: |
+        整体替换该成员的社团注册记录，不是增量：`memberships` 即替换后的完整集合。
+        请求中未出现的社团会被置为 `alumni` 并保留历史，不会删除记录。
+        同一社团只能出现一次，重复出现返回 `422 validation_failed`。
+      required:
+        - memberships
+      properties:
+        memberships:
+          type: array
+          description: 替换后的完整社团注册集合；空数组表示两个社团都退出。
+          items:
+            $ref: './identity.yaml#/components/schemas/ClubMembership'
+      examples:
+        - memberships:
+            - club: safewind_software
+              status: active
+              registered_at: '2023-09-20'
+              role: 干事
+            - club: acm_icpc
+              status: active
+              registered_at: '2024-03-01'
+              role: 成员
+
+    Team:
+      type: object
+      description: |
+        队伍/分组。同名唯一性以 `season` 为作用域：**同一 season 内 `name` 唯一**，
+        不同 season 可以重名。
+
+        `member_ids` 与 `members` 表示同一集合：`member_ids` 是成员主体 id 的
+        有序列表，`members` 是同一顺序的内联条目，含角色与学号等渲染所需字段。
+        列表接口只返回 `member_ids` 与 `member_count`；单资源接口两者一并返回且
+        长度必须一致。`member_count` 恒等于 `member_ids` 的长度。
+      required:
+        - id
+        - name
+        - member_count
+        - member_ids
+        - created_at
+        - updated_at
+        - revision
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 队伍名，同一 season 内唯一；重名返回 `409 conflict`。
+          examples:
+            - DMU-1
+        short_name:
+          type: string
+          maxLength: 32
+          description: 展示用短名，例如榜单列头；省略时前端回退到 `name`。
+          examples:
+            - DMU-1
+        season:
+          type: string
+          pattern: '^\d{4}-\d{4}$'
+          description: |
+            赛季标识，形如 `2024-2025`（学年起止年）。省略时归入服务端当前赛季。
+          examples:
+            - 2024-2025
+        description:
+          type: string
+          maxLength: 500
+          description: 队伍说明（自由文本）。
+          examples:
+            - 2024 赛季一队，参加 CCPC 网络赛与区域赛。
+        captain_id:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Id'
+            - type: 'null'
+          description: |
+            队长的主体 id；与 `members` 中 `role=captain` 的条目的 `principal.id` 一致。
+            暂未指定队长时为 `null`。
+        external_id:
+          type: [string, 'null']
+          description: |
+            外部系统（ICPC 报名系统、比赛平台）中的队伍号，用于对账与成绩回填。
+            未绑定时为 `null`。
+        labels:
+          $ref: './identity.yaml#/components/schemas/LabelSet'
+          description: 队伍标签，例如 `2024`、`a-team`、`women`，供榜单与名额池筛选。
+        member_ids:
+          type: array
+          description: 成员主体 id 列表（有序，与 `members` 顺序一致）。
+          items:
+            $ref: './common.yaml#/components/schemas/Id'
+        member_count:
+          type: integer
+          minimum: 0
+          description: 成员人数，恒等于 `member_ids` 的长度（只读派生字段）。
+          examples:
+            - 3
+        members:
+          type: array
+          description: |
+            内联成员条目，含角色与学号，**仅单资源视图返回**；
+            与 `member_ids` 一一对应且顺序一致。
+          items:
+            $ref: '#/components/schemas/TeamMember'
+        created_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        updated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        revision:
+          type: string
+          description: 版本标记，与 `ETag` 值一致；`PATCH`/`PUT members` 可用 `If-Match` 做乐观并发控制。
+          examples:
+            - '4'
+      examples:
+        - id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          name: DMU-1
+          short_name: DMU-1
+          season: 2024-2025
+          description: 2024 赛季一队。
+          captain_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          external_id: ICPC-2024-CN-0123
+          labels:
+            - '2024'
+            - a-team
+          member_ids:
+            - acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          member_count: 1
+          members:
+            - principal:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              role: captain
+              joined_at: '2024-01-10T02:00:00.000Z'
+              student_id: '2220210000'
+              enrollment_year: 2022
+          created_at: '2024-01-10T02:00:00.000Z'
+          updated_at: '2024-05-06T07:08:09.123Z'
+          revision: '4'
+
+    TeamMember:
+      type: object
+      description: |
+        队伍成员条目，用于直接渲染队伍表（无需再逐个回源成员档案）。
+        `role=captain` 的条目至多一条，且与队伍的 `captain_id` 一致；
+        `coach` 通常是不进入成员名单的教练账号。
+      required:
+        - principal
+        - role
+        - joined_at
+      properties:
+        principal:
+          $ref: './common.yaml#/components/schemas/PrincipalRef'
+        role:
+          type: string
+          enum:
+            - member
+            - captain
+            - coach
+          default: member
+          description: |
+            队内角色。默认 `member`；`captain` 至多一名（第二人返回 `422`）；
+            `coach` 不计入参赛人数上限。
+          examples:
+            - captain
+        joined_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        masked_fields:
+          type: array
+          readOnly: true
+          description: |
+            被脱敏的字段名。队伍详情里的 `student_id` 属于个人身份信息，缺少
+            `member:read_pii` 且不是本人时返回 `null` 并在此列出；见 `PrincipalProfile.masked_fields`。
+          items:
+            type: string
+          examples:
+            - - student_id
+        student_id:
+          type: string
+          maxLength: 32
+          description: 冗余的学号，取自该成员的档案；档案缺失时为省略。
+          examples:
+            - '2220210000'
+        enrollment_year:
+          type: integer
+          minimum: 1990
+          maximum: 2100
+          description: 冗余的入学年份，取自该成员的档案；用于按年级展示队伍。
+          examples:
+            - 2022
+      examples:
+        - principal:
+            id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            username: alice
+            display_name: 张三
+            kind: human
+          role: captain
+          joined_at: '2024-01-10T02:00:00.000Z'
+          student_id: '2220210000'
+          enrollment_year: 2022
+
+    PagedTeam:
+      description: 队伍的分页结果。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/PageMeta'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页的队伍列表，不含内联 `members`。
+              items:
+                $ref: '#/components/schemas/Team'
+      examples:
+        - page: 1
+          size: 20
+          total: 8
+          has_next: false
+          items:
+            - id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              name: DMU-1
+              season: 2024-2025
+              labels:
+                - '2024'
+              member_ids:
+                - acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              member_count: 1
+              created_at: '2024-01-10T02:00:00.000Z'
+              updated_at: '2024-05-06T07:08:09.123Z'
+              revision: '4'
+
+    CreateTeamRequest:
+      type: object
+      description: |
+        新建队伍。`season` 省略时归入服务端当前赛季；同一 season 内 `name` 重复
+        返回 `409 conflict`。创建者成为该队伍的初始管理者（写审计）。
+        成员名单不在此接口设置，请随后调用 `PUT /teams/{team_id}/members`。
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 队伍名，同一 season 内唯一。
+          examples:
+            - DMU-1
+        short_name:
+          type: string
+          maxLength: 32
+          description: 展示用短名。
+          examples:
+            - DMU-1
+        season:
+          type: string
+          pattern: '^\d{4}-\d{4}$'
+          description: 赛季标识，形如 `2024-2025`；省略时为服务端当前赛季。
+          examples:
+            - 2024-2025
+        description:
+          type: string
+          maxLength: 500
+          description: 队伍说明。
+        labels:
+          $ref: './identity.yaml#/components/schemas/LabelSet'
+          description: 初始标签集合。
+        external_id:
+          type: [string, 'null']
+          description: 外部系统的队伍号。
+      examples:
+        - name: DMU-1
+          short_name: DMU-1
+          season: 2024-2025
+          description: 2024 赛季一队。
+          labels:
+            - '2024'
+            - a-team
+          external_id: ICPC-2024-CN-0123
+
+    UpdateTeamRequest:
+      type: object
+      description: |
+        修改队伍元信息，**全部字段可选**，只覆盖出现的字段。
+        **不含成员名单**：成员替换必须走 `PUT /teams/{team_id}/members`。
+        改名到同一 season 内已存在的名字返回 `409 conflict`。
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 新的队伍名，同一 season 内唯一。
+        short_name:
+          type: string
+          maxLength: 32
+          description: 新的短名。
+        season:
+          type: string
+          pattern: '^\d{4}-\d{4}$'
+          description: |
+            迁移到另一个赛季；迁移后按目标赛季重新做重名校验，冲突返回 `409 conflict`。
+        description:
+          type: string
+          maxLength: 500
+          description: 新的队伍说明。
+        labels:
+          $ref: './identity.yaml#/components/schemas/LabelSet'
+          description: 替换后的完整标签集合。
+        external_id:
+          type: [string, 'null']
+          description: 新的外部队伍号；显式传 `null` 表示解绑。
+      examples:
+        - short_name: DMU-A
+          labels:
+            - '2024'
+            - a-team
+        - description: 2024 赛季一队（原 DMU-1）。
+          external_id: null
+
+    SetTeamMembersRequest:
+      type: object
+      description: |
+        全量替换队伍成员名单（**替换语义**，不是增量）：请求中的列表即替换后的
+        最终名单，未出现的成员被移出，`joined_at` 保留首次加入时刻、被移出后
+        再加入视为新加入。
+
+        约束（违反时整个请求失败，不做部分替换）：同一 season 内同一成员已在
+        另一支队伍中、或任一 `principal_id` 不在任何社团（`clubs` 为空）返回
+        `409 conflict`；人数超过服务端上限返回 `422 unprocessable_entity`；
+        出现两个 `captain` 或重复 `principal_id` 返回 `422`。
+      required:
+        - members
+      properties:
+        members:
+          type: array
+          description: 替换后的完整成员列表；空数组表示清空名单。
+          items:
+            type: object
+            description: 一条成员指定项：主体 id + 可选角色。
+            required:
+              - principal_id
+            properties:
+              principal_id:
+                $ref: './common.yaml#/components/schemas/Id'
+                description: 成员主体的 id，必须在成员名单中。
+              role:
+                type: string
+                enum:
+                  - member
+                  - captain
+                  - coach
+                default: member
+                description: 队内角色，默认 `member`；`captain` 至多一名。
+                examples:
+                  - member
+            examples:
+              - principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                role: captain
+      examples:
+        - members:
+            - principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              role: captain
+            - principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+              role: member
+
+    # --------------------------------------------------------------- 批量导入
+    ImportRequest:
+      type: object
+      description: |
+        批量导入成员。整批在**单个事务**内按 `on_conflict` 策略处理；
+        **行级校验失败不阻断其它行**（部分成功），逐行结果见响应 `rows[]`。
+        单批最多 1000 行（CSV 按数据行计，不含表头），超出返回
+        `413 payload_too_large`；请求体字节数超限同样返回 `413`。
+
+        CSV（`format=csv`）的列头必须支持：
+        `username,display_name,student_id,enrollment_year,major,email,phone,qq,clubs,labels,scopes,oj_handles`。
+        其中 `labels`/`scopes` 用 `|` 分隔，例如 `member|2022`，
+        `oj_handles` 形如 `codeforces:alice|atcoder:alice`。
+
+        **合并规则**：`on_conflict=update` 时，行内的 `labels`、`scopes`、`clubs`、
+        `oj_handles` 都是**合并**而不是整体替换——导入通常只补增量，因此空单元格表示
+        "该项不动"，不会清空既有值；要清空请用对应的替换接口。`on_conflict=skip` 时
+        该行完全不写入（既不合并也不新建），`on_conflict=fail` 时只要存在冲突就整体失败
+        且不写入任何行。
+
+        **副作用**：新建的主体初始**没有口令与凭证**，需管理员用
+        `POST /accounts/{account_id}/password-reset` 设置初始口令后才能登录。导入不会修改成员资格之外的任何权限字段。
+      required:
+        - format
+      properties:
+        format:
+          type: string
+          enum:
+            - csv
+            - json
+          description: |
+            载荷格式。`csv` 必须提供 `csv` 字段，`json` 必须提供 `members` 字段；
+            两者同时出现、或字段与 `format` 不匹配时返回 `422 validation_failed`。
+          examples:
+            - csv
+        csv:
+          type: string
+          description: |
+            CSV 文本（UTF-8，首行为列头，支持 RFC 4180 引号转义）。仅 `format=csv` 时允许。
+          examples:
+            - |
+              username,display_name,student_id,enrollment_year,major,clubs,labels
+              alice,张三,2220210000,2022,计算机科学与技术,acm_icpc|safewind_software,member|2022
+        members:
+          type: array
+          description: 结构化的成员行。仅 `format=json` 时允许。
+          items:
+            $ref: '#/components/schemas/ImportMemberRow'
+        on_conflict:
+          type: string
+          enum:
+            - skip
+            - update
+            - fail
+          default: skip
+          description: |
+            冲突（`username` 或 `student_id` 已存在）处理策略：
+            `skip` 跳过该行并计入 `skipped`；`update` 用该行字段覆盖已有档案并计入
+            `updated`；`fail` 不写入任何行并整体返回 `409 conflict`。
+          examples:
+            - skip
+        dry_run:
+          type: boolean
+          default: false
+          description: |
+            为 `true` 时只做校验与计数，**不落库**、不分配 id；响应形状不变，
+            但 `created`/`updated` 为预演值、`principal_id` 为合成值。
+          examples:
+            - false
+      examples:
+        - format: csv
+          csv: |
+            username,display_name,student_id,enrollment_year,major,email,clubs,labels,oj_handles
+            alice,张三,2220210000,2022,计算机科学与技术,alice@example.edu.cn,acm_icpc|safewind_software,member|2022,codeforces:alice|atcoder:alice
+          on_conflict: skip
+          dry_run: false
+        - format: json
+          members:
+            - username: bob
+              display_name: 李四
+              student_id: '2220210001'
+              enrollment_year: 2022
+              major: 软件工程
+              clubs:
+                - acm_icpc
+              labels:
+                - member
+                - '2022'
+              scopes:
+                - account:self
+              oj_handles:
+                - judge: codeforces
+                  handle: bob
+          on_conflict: update
+          dry_run: true
+
+    ImportMemberRow:
+      type: object
+      description: |
+        一行导入数据，字段与 CSV 列头一一对应（CSV 中未出现的列按省略处理）。
+        `username` 是行的身份键：已存在时按 `on_conflict` 处理；不存在时按本行字段
+        新建主体，成员资格由该行的 `clubs` 列决定。
+      required:
+        - username
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 32
+          pattern: '^[a-z0-9][a-z0-9._-]*$'
+          description: 登录名；导入的身份键，不可通过本接口修改。
+          examples:
+            - alice
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 展示名；省略时回退为 `username`。
+          examples:
+            - 张三
+        student_id:
+          type: string
+          maxLength: 32
+          description: 学号；全局唯一，冲突按 `on_conflict` 处理。
+          examples:
+            - '2220210000'
+        enrollment_year:
+          type: integer
+          minimum: 1990
+          maximum: 2100
+          description: 入学年份。
+          examples:
+            - 2022
+        major:
+          type: string
+          maxLength: 80
+          description: 专业。
+          examples:
+            - 计算机科学与技术
+        email:
+          type: string
+          format: email
+          description: 联系邮箱。
+          examples:
+            - alice@example.edu.cn
+        phone:
+          type: string
+          maxLength: 32
+          description: 联系电话（PII，仅 `member:read` 及以上可见）。
+          examples:
+            - '13800000000'
+        qq:
+          type: string
+          maxLength: 20
+          description: QQ 号。
+          examples:
+            - '10001'
+        clubs:
+          type: array
+          description: |
+            该行主体要登记的社团，可多填，空表示不在任何社团。`on_conflict=update` 时
+            与既有记录合并，不会清掉未列出的社团；登记的日期取导入时刻，角色留空，需要
+            更细的信息再用 `PUT /members/{member_id}/clubs` 补。
+          items:
+            $ref: './identity.yaml#/components/schemas/ClubCode'
+          examples:
+            - - acm_icpc
+              - safewind_software
+        labels:
+          $ref: './identity.yaml#/components/schemas/LabelSet'
+          description: 标签集合；`update` 策略下为替换后的完整集合。
+        scopes:
+          $ref: './identity.yaml#/components/schemas/ScopeSet'
+          description: |
+            scope 集合；调用者不能授予自己不持有的 scope，否则该行失败
+            （`errors[].code=insufficient_scope`），其它行继续处理。
+        oj_handles:
+          type: array
+          description: |
+            该行的 OJ 绑定；`judge` 必须在服务端启用的平台内，否则该行失败。
+            重复绑定（同一 `judge`+`handle` 已被他人占用）同样导致该行失败。
+          items:
+            type: object
+            description: 一条 OJ 绑定（平台 + 账号名）。
+            required:
+              - judge
+              - handle
+            properties:
+              judge:
+                $ref: './common.yaml#/components/schemas/Judge'
+              handle:
+                type: string
+                minLength: 1
+                maxLength: 64
+                description: 该平台上的账号名。
+                examples:
+                  - alice
+            examples:
+              - judge: codeforces
+                handle: alice
+      examples:
+        - username: alice
+          display_name: 张三
+          student_id: '2220210000'
+          enrollment_year: 2022
+          major: 计算机科学与技术
+          email: alice@example.edu.cn
+          phone: '13800000000'
+          qq: '10001'
+          clubs:
+            - acm_icpc
+          labels:
+            - member
+            - '2022'
+          scopes:
+            - account:self
+          oj_handles:
+            - judge: codeforces
+              handle: alice
+
+    ImportResult:
+      type: object
+      description: |
+        导入结果。计数 `created + updated + skipped + failed` 恒等于提交的行数
+        （表头与空行不计）。行级失败不阻断其它行，因此 `failed > 0` 时其它行
+        仍然生效（部分成功）。`dry_run=true` 时所有计数都是"将要发生"的预演值，
+        且没有产生任何持久化副作用。
+      required:
+        - dry_run
+        - created
+        - updated
+        - skipped
+        - failed
+        - rows
+      properties:
+        dry_run:
+          type: boolean
+          description: 回显本次是否为预演（未落库）。
+          examples:
+            - false
+        created:
+          type: integer
+          minimum: 0
+          description: 新建的主体数。
+          examples:
+            - 1
+        updated:
+          type: integer
+          minimum: 0
+          description: 按 `on_conflict=update` 覆盖的主体数。
+          examples:
+            - 0
+        skipped:
+          type: integer
+          minimum: 0
+          description: 按 `on_conflict=skip` 跳过的冲突行数。
+          examples:
+            - 0
+        failed:
+          type: integer
+          minimum: 0
+          description: 校验或冲突失败的行数（明细见 `rows[]` 中 `action=failed` 的条目）。
+          examples:
+            - 0
+        rows:
+          type: array
+          description: 逐行结果，顺序与输入行一致。
+          items:
+            $ref: '#/components/schemas/ImportRowResult'
+      examples:
+        - dry_run: false
+          created: 1
+          updated: 0
+          skipped: 0
+          failed: 1
+          rows:
+            - row_number: 2
+              action: created
+              principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              errors: []
+            - row_number: 3
+              action: failed
+              principal_id: null
+              errors:
+                - pointer: /email
+                  message: email 格式非法
+                  code: format
+
+    ImportRowResult:
+      type: object
+      description: |
+        单行的处理结果。`action=failed` 时 `errors` 至少一项；其余情况下 `errors`
+        为空数组。`dry_run=true` 时 `principal_id` 为合成值，不应被持久化引用。
+      required:
+        - row_number
+        - action
+        - errors
+      properties:
+        row_number:
+          type: integer
+          minimum: 1
+          description: |
+            输入行号：CSV 为文件中的物理行号，含表头行，首个数据行为 2；
+            JSON 为 `members` 数组下标 + 1。
+          examples:
+            - 2
+        action:
+          type: string
+          enum:
+            - created
+            - updated
+            - skipped
+            - failed
+          description: 该行的处理动作。
+          examples:
+            - created
+        principal_id:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Id'
+            - type: 'null'
+          description: 该行对应的主体 id；`action=skipped` 时为已存在主体的 id，失败时为 `null`。
+        errors:
+          type: array
+          description: |
+            该行的校验/冲突错误；`pointer` 相对该行对象，例如 `/email`，
+            冲突类错误使用 `code=conflict`，权限不足使用 `code=insufficient_scope`。
+          items:
+            $ref: './common.yaml#/components/schemas/ValidationError'
+      examples:
+        - row_number: 2
+          action: created
+          principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          errors: []
+
+    # --------------------------------------------------------------- 成员名单导出
+    RosterExportFilters:
+      type: object
+      description: |
+        导出的筛选条件，全部可选；省略即不施加该条件。
+        `labels` 为 AND（必须同时具备全部标签），`enrollment_years` 为 OR
+        （命中任一入学年份即可）。`enrollment_year` 与 `enrollment_years` 同时
+        出现时取并集。
+      properties:
+        q:
+          type: string
+          maxLength: 64
+          description: 模糊匹配展示名、用户名与学号。
+          examples:
+            - 张
+        labels:
+          $ref: './identity.yaml#/components/schemas/LabelSet'
+          description: 必须同时具备的标签集合（AND）。
+        enrollment_year:
+          type: integer
+          minimum: 1990
+          maximum: 2100
+          description: 单个入学年份。
+          examples:
+            - 2022
+        enrollment_years:
+          type: array
+          description: 多个入学年份（OR）。
+          items:
+            type: integer
+            minimum: 1990
+            maximum: 2100
+          examples:
+            - - 2022
+              - 2023
+        major:
+          type: string
+          maxLength: 80
+          description: 专业精确匹配。
+          examples:
+            - 计算机科学与技术
+        team_id:
+          $ref: './common.yaml#/components/schemas/Id'
+          description: 限定该队伍当前赛季的成员。
+        status:
+          $ref: './identity.yaml#/components/schemas/AccountStatus'
+          description: 账号状态过滤；省略时包含 `active` 与 `disabled`。
+      examples:
+        - labels:
+            - member
+            - '2022'
+          enrollment_years:
+            - 2022
+            - 2023
+    RosterExportClubCount:
+      type: object
+      description: 某个社团在这次导出中的计数，便于核对两份名单。
+      required:
+        - club
+        - included
+        - excluded_inactive
+      properties:
+        club:
+          $ref: './identity.yaml#/components/schemas/ClubCode'
+        included:
+          type: integer
+          minimum: 0
+          description: 进入产物的该社团成员数。
+        excluded_inactive:
+          type: integer
+          minimum: 0
+          description: 因在该社团在册期内没有活跃而被排除的成员数。
+      examples:
+        - club: acm_icpc
+          included: 52
+          excluded_inactive: 9
+
+    RosterExportRequest:
+      type: object
+      description: |
+        发起成员名单导出的参数。默认值即"安全默认"：`format=csv`、
+        `include_inactive=false` 且 `active_within=P365D`，含义是
+        **只导出最近 1 年内活跃过的成员**，因此**超过 1 年未活跃的成员被自动排除**
+        （被排除人数可从 `RosterExport.excluded_inactive_count` 观测）。
+        需要全量成员名单时必须显式给出 `include_inactive=true`（此时 `active_within`
+        仍作为统计口径）。
+      properties:
+        format:
+          type: string
+          enum:
+            - csv
+            - json
+          default: csv
+          description: 产物格式；决定下载响应的 `Content-Type`。
+          examples:
+            - csv
+        clubs:
+          type: array
+          description: |
+            只导出在这些社团注册的成员，可多选；省略时导出两个社团的**合并名单**，
+            同一人只出现一次并在 `clubs` 列列出其社团。
+            给出时 `active_within` 按社团在册期计算，只看该社团注册之后的活跃。
+          items:
+            $ref: './identity.yaml#/components/schemas/ClubCode'
+        include_inactive:
+          type: boolean
+          default: false
+          description: |
+            默认为 `false`，此时只保留最近 `active_within` 内活跃过的成员，
+            即排除 `last_active_at` 早于 `now - active_within` 的人
+            （从未活跃者一律排除）；为 `true` 时不做该过滤。
+            指定 `clubs` 时，判定依据是该社团在册期内的活跃。
+          examples:
+            - false
+        active_within:
+          $ref: './common.yaml#/components/schemas/Duration'
+          description: |
+            活跃度窗口，默认 `P365D`：只保留在该窗口内活跃过的成员。
+            仅当 `include_inactive=false` 时生效；被排除者计入
+            `excluded_inactive_count`。
+          examples:
+            - P365D
+        columns:
+          type: array
+          description: |
+            产出的列，决定 CSV 列头与 JSON 字段名。未知列名返回 `422 validation_failed`。
+
+            省略时按下面的默认集合产出：`username`、`display_name`、`student_id`、
+            `enrollment_year`、`grade`、`major`、`email`、`phone`、`qq`、`clubs`、
+            `labels`、`teams`，再加上 `include_oj_handles=true` 时的 `oj_handles` 与
+            `include_activity=true` 时的活跃度列。**`clubs` 默认就在列表里**：即使导出的是
+            两个社团的合并名单，也能从这一列看出每行属于哪些社团，值用 `|` 分隔。
+          items:
+            type: string
+            maxLength: 64
+          examples:
+            - - username
+              - display_name
+              - student_id
+              - enrollment_year
+              - major
+              - email
+              - phone
+        filters:
+          $ref: '#/components/schemas/RosterExportFilters'
+        include_oj_handles:
+          type: boolean
+          default: true
+          description: 是否包含 OJ 绑定列（`judge:handle` 形式，多个用 `|` 分隔）。
+          examples:
+            - true
+        include_activity:
+          type: boolean
+          default: true
+          description: 是否包含活动度列（`activity_state`、`last_active_at` 等）。
+          examples:
+            - true
+      examples:
+        - format: csv
+          include_inactive: false
+          active_within: P365D
+          columns:
+            - username
+            - display_name
+            - student_id
+            - enrollment_year
+            - major
+            - email
+          filters:
+            labels:
+              - member
+            enrollment_years:
+              - 2022
+              - 2023
+          include_oj_handles: true
+          include_activity: true
+
+    RosterExport:
+      type: object
+      description: |
+        成员名单导出产物。由 `POST /roster/exports` 异步生成，状态机：
+        `queued → running → (succeeded | failed)`；产物超过保留期被清理后，
+        `succeeded → expired`（此时 `download_url` 失效，下载返回
+        `410 export_expired`）。
+
+        `download_url` 是短时有效的**相对 URI**，默认 15 分钟，
+        截止时刻见 `download_expires_at`；链接过期后需重新
+        `GET /roster/exports/{export_id}` 获取新链接，或重新发起导出。
+      required:
+        - id
+        - status
+        - format
+        - include_inactive
+        - active_within
+        - created_at
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        status:
+          $ref: './common.yaml#/components/schemas/JobState'
+          description: |
+            导出状态，与异步任务共用同一套状态机。`queued`/`running` 时 `download_url`
+            为空；`succeeded` 后 `row_count`、`size_bytes`、`download_url` 才可用；
+            `failed` 时 `error` 给出原因；`cancelled` 表示被管理员取消；
+            `expired` 表示产物已被保留策略清理（元数据保留，文件不可再下载）。
+            该字段**只由服务端推进**，客户端不能提交：下载未完成或失败的产物返回
+            `409 conflict`，下载已清理的产物返回 `410 export_expired`，只能重新发起导出。
+          examples:
+            - succeeded
+        format:
+          type: string
+          enum:
+            - csv
+            - json
+          description: 产物格式，决定下载响应的 `Content-Type`。
+          examples:
+            - csv
+        include_inactive:
+          type: boolean
+          description: 本次导出是否包含长期未活跃成员，回显请求参数，默认 `false`。
+          examples:
+            - false
+        active_within:
+          $ref: './common.yaml#/components/schemas/Duration'
+          description: 本次导出使用的活跃度窗口，回显请求参数，默认 `P365D`。
+          examples:
+            - P365D
+        clubs:
+          type: array
+          description: 本次导出限定的社团，回显请求参数；未限定时为空数组。
+          items:
+            $ref: './identity.yaml#/components/schemas/ClubCode'
+        club_counts:
+          type: array
+          description: |
+            按社团拆分的计数，便于分别核对两个社团的名单。
+            未按社团拆分时，即 `clubs` 为空时可省略。
+          items:
+            $ref: '#/components/schemas/RosterExportClubCount'
+        row_count:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: 'null'
+          description: 产物中的数据行数，不含 CSV 表头；未完成时为 `null`。
+        excluded_inactive_count:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: 'null'
+          description: |
+            **因在 `active_within` 窗口内没有活跃而被自动排除的人数**
+            （`include_inactive=false` 时统计，否则为 0）；未完成时为 `null`。
+            该字段使"默认排除"可观测，避免静默丢人。
+        size_bytes:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: 'null'
+          description: 产物字节数；未完成或已过期清理时为 `null`。
+        download_url:
+          oneOf:
+            - type: string
+            - type: 'null'
+          description: |
+            短时有效的相对 URI，默认 15 分钟。必须携带调用者凭证（或其中的
+            短时下载令牌）请求；过期或产物被清理后为 `null`，
+            需重新获取导出或重新发起。
+          examples:
+            - /api/v1/roster/exports/exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0/download?download_token=xcd_7f3aQ0K3M7N9P2R4T6W8X0
+        download_expires_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: '`download_url` 的失效时刻；链接过期后重新获取该资源可得到新链接。'
+        created_by:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/PrincipalRef'
+            - type: 'null'
+          description: 发起导出的主体；`excluded_inactive_count` 等 PII 操作可据此审计。
+        created_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        completed_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 进入终态（`succeeded`/`failed`）的时刻；未完成时为 `null`。
+        error:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Problem'
+            - type: 'null'
+          description: 失败原因（`status=failed` 时非空）。
+        filters:
+          $ref: '#/components/schemas/RosterExportFilters'
+          description: 本次导出实际生效的筛选条件，回显请求参数。
+        columns:
+          type: array
+          description: 本次导出实际产出的列（回显或服务端补齐的默认列）。
+          items:
+            type: string
+      examples:
+        - id: exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          status: succeeded
+          format: csv
+          include_inactive: false
+          active_within: P365D
+          row_count: 87
+          excluded_inactive_count: 12
+          size_bytes: 20480
+          download_url: /api/v1/roster/exports/exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0/download?download_token=xcd_7f3aQ0K3M7N9P2R4T6W8X0
+          download_expires_at: '2024-05-06T07:23:09.123Z'
+          created_by:
+            id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            username: alice
+            display_name: 张三
+            kind: human
+          created_at: '2024-05-06T07:08:09.123Z'
+          completed_at: '2024-05-06T07:08:11.000Z'
+          error: null
+          filters:
+            labels:
+              - member
+          columns:
+            - username
+            - display_name
+            - student_id
+
+    PagedRosterExport:
+      description: 成员名单导出记录的分页结果。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/PageMeta'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页的导出记录，按 `created_at` 倒序。
+              items:
+                $ref: '#/components/schemas/RosterExport'
+      examples:
+        - page: 1
+          size: 20
+          total: 2
+          has_next: false
+          items:
+            - id: exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              status: succeeded
+              format: csv
+              include_inactive: false
+              active_within: P365D
+              row_count: 87
+              excluded_inactive_count: 12
+              size_bytes: 20480
+              download_url: /api/v1/roster/exports/exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0/download?download_token=xcd_7f3aQ0K3M7N9P2R4T6W8X0
+              download_expires_at: '2024-05-06T07:23:09.123Z'
+              created_at: '2024-05-06T07:08:09.123Z'
+              completed_at: '2024-05-06T07:08:11.000Z'
+              error: null

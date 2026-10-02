@@ -1,0 +1,901 @@
+scoreboards:
+  get:
+    tags:
+      - scoreboards
+    operationId: listScoreboards
+    summary: 列出榜单定义
+    description: |
+      **权限与可见性**：分三档。
+      匿名请求只在服务器 `capabilities.public_read=true` 时被接受，且只能看到
+      `visibility=public` 的榜单；已认证主体的可见范围取决于 scope：持有
+      `scoreboard:read` 及以上的主体可以额外看到 `visibility=members` 与 `visibility=private`
+      的榜单；只有 `scoreboard:read` 时看不到 `private`。
+      匿名且 `public_read=false` 返回 `401`；已认证但缺 `scoreboard:read` 时，
+      可见范围收窄到 `public`，不会再返回 `403`；不可见的榜单不出现在结果里，
+      按 id 直接读取时返回 `404`。
+
+      **过滤**：`scope` 按口径、`judge` 按平台、`q` 按名称/描述模糊匹配、`visibility`
+      按可见性、`stale=true` 只返回新鲜度已落后的榜单，便于巡检并批量触发重建、
+      `updated_since` 按 `updated_at` 严格递增做增量拉取。
+
+      **时序**：榜单是**物化聚合**，返回值可能落后于采集写入。`generated_at` 是最近一次
+      物化完成时刻，`stale` 表示该榜单已超出新鲜度上界 `PT15M`；落后超过该上界时应调用
+      `POST /scoreboards/{scoreboard_id}/rebuild` 触发重建；重复触发不会并发重算。
+
+      **分页与排序**：`page`/`size` 偏移分页，`size` 上限 200；`sort` 支持 `name`、
+      `created_at`、`generated_at`，`order` 默认 `desc`。空结果返回 `items: []` 而非 `404`。
+    security:
+      - {}
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Page
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Size
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Order
+      - $ref: ../components/parameters/common.yaml#/components/parameters/UpdatedSince
+      - name: scope
+        in: query
+        required: false
+        description: 仅返回该口径的榜单。
+        schema:
+          $ref: ../components/schemas/boards.yaml#/components/schemas/ScoreboardScope
+        example: individual
+      - name: judge
+        in: query
+        required: false
+        description: 仅返回限定该平台的榜单；不含跨平台榜单。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Judge
+        example: codeforces
+      - name: q
+        in: query
+        required: false
+        description: 按名称与描述做大小写不敏感的模糊匹配。
+        schema:
+          type: string
+          maxLength: 64
+        example: 2024-2025
+      - name: visibility
+        in: query
+        required: false
+        description: 仅返回该可见性的榜单；结果仍受调用者可见性约束。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Visibility
+        example: public
+      - name: stale
+        in: query
+        required: false
+        description: |
+          `true` 只返回 `stale=true`（已落后于采集写入）的榜单，用于巡检；
+          `false` 只返回新鲜的榜单；省略表示不限制。
+        schema:
+          type: boolean
+        example: true
+      - name: sort
+        in: query
+        required: false
+        description: 排序字段；默认 `created_at`，与 `order` 组合。
+        schema:
+          type: string
+          enum:
+            - name
+            - created_at
+            - generated_at
+            - updated_at
+          default: created_at
+        example: created_at
+    responses:
+      '200':
+        description: 榜单定义分页结果。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/boards.yaml#/components/schemas/PagedScoreboard
+            example:
+              page: 1
+              size: 20
+              total: 4
+              has_next: false
+              items:
+                - id: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  name: CF 2024-2025 个人榜
+                  description: 跨平台个人积分榜，按累计解题数排名。
+                  scope: individual
+                  metric: solved_count
+                  judge: codeforces
+                  judge_label: null
+                  period:
+                    kind: season
+                    season: 2024-2025
+                    window: null
+                    from: null
+                    to: null
+                  filter:
+                    judges:
+                      - codeforces
+                    enrollment_years:
+                      - 2022
+                      - 2023
+                    labels:
+                      - member
+                    team_ids: []
+                    include_inactive: false
+                  visibility: public
+                  entry_count: 137
+                  generated_at: '2024-05-06T07:00:00.000Z'
+                  stale: false
+                  next_refresh_at: '2024-05-06T07:15:00.000Z'
+                  source_updated_at: '2024-05-06T06:58:00.000Z'
+                  revision: '17'
+                  created_at: '2024-01-02T03:04:05.000Z'
+                  updated_at: '2024-05-06T07:00:00.000Z'
+                  created_by:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT15M
+    x-cacheable: true
+
+  post:
+    tags:
+      - scoreboards
+    operationId: createScoreboard
+    summary: 创建榜单
+    description: |
+      **权限**：需要 `scoreboard:manage`（或 `scoreboard:*`、`*`）。
+
+      **语义**：只写入榜单**定义**，不等待重算。因此 `201` 响应中的 `entry_count` 恒为
+      `0`、`stale` 恒为 `true`、`generated_at` 为 `null`：首次物化由服务端排队的
+      `scoreboard_rebuild` 任务（客户端可用 `GET /jobs/{job_id}` 观察）或下一次调度完成，
+      完成后 `entry_count`/`generated_at` 才反映真实数据。`scope`+`metric`+`filter`
+      完全相同的重复定义、以及与既有榜单重名都返回 `409 conflict`。
+
+      **幂等**：必须携带 `Idempotency-Key`；同一主体 + 同一端点 + 同一键在保留期内重放
+      返回首次的 `201` 与同一 `id`，并带 `Idempotency-Replayed: true`；请求体不同则
+      `409 idempotency_key_reused`。
+
+      **时序**：定义本身强一致且立即可读；返回的聚合字段是物化快照，可能落后于采集写入
+      （`x-freshness-bound: PT15M`）。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/boards.yaml#/components/schemas/CreateScoreboardRequest
+          example:
+            name: CF 2024-2025 个人榜
+            description: 跨平台个人积分榜，按累计解题数排名。
+            scope: individual
+            metric: solved_count
+            judge: codeforces
+            period:
+              kind: season
+              season: 2024-2025
+            filter:
+              judges:
+                - codeforces
+              include_inactive: false
+            visibility: public
+    responses:
+      '201':
+        description: 榜单已创建；条目数据待首次物化。
+        headers:
+          Location:
+            $ref: ../components/headers/common.yaml#/components/headers/Location
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/boards.yaml#/components/schemas/Scoreboard
+            example:
+              id: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              name: CF 2024-2025 个人榜
+              description: 跨平台个人积分榜，按累计解题数排名。
+              scope: individual
+              metric: solved_count
+              judge: codeforces
+              judge_label: null
+              period:
+                kind: season
+                season: 2024-2025
+                window: null
+                from: null
+                to: null
+              filter:
+                judges:
+                  - codeforces
+                enrollment_years: []
+                labels: []
+                team_ids: []
+                include_inactive: false
+              visibility: public
+              entry_count: 0
+              generated_at: null
+              stale: true
+              next_refresh_at: '2024-05-06T07:10:00.000Z'
+              source_updated_at: null
+              revision: '1'
+              created_at: '2024-05-06T07:08:09.123Z'
+              updated_at: '2024-05-06T07:08:09.123Z'
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT15M
+
+scoreboard:
+  parameters:
+    - name: scoreboard_id
+      in: path
+      required: true
+      description: 榜单 id，前缀 `sbd_`。
+      schema:
+        $ref: ../components/schemas/common.yaml#/components/schemas/Id
+      example: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+  get:
+    tags:
+      - scoreboards
+    operationId: getScoreboard
+    summary: 获取单个榜单
+    description: |
+      **权限**：公开读。匿名可读仅当 `capabilities.public_read=true` 且榜单
+      `visibility=public`；否则需要认证并持有 `scoreboard:read`，或通配的 `scoreboard:*` 与 `*`。
+      不可见与不存在都返回 `404 not_found`（避免信息泄露）。
+
+      **条件请求**：返回强 `ETag`（与 `revision` 一致）；带 `If-None-Match` 且未变化时
+      返回 `304`，可直接用于离线缓存。
+
+      **时序**：榜单是**物化聚合**，返回值可能落后于采集写入；`generated_at` 是物化时刻、
+      `stale` 表示已超出 `PT15M` 上界；落后超上界应触发
+      `POST /scoreboards/{scoreboard_id}/rebuild`。
+    security:
+      - {}
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 榜单定义与物化状态。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/boards.yaml#/components/schemas/Scoreboard
+            example:
+              id: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              name: CF 2024-2025 个人榜
+              description: 跨平台个人积分榜，按累计解题数排名。
+              scope: individual
+              metric: solved_count
+              judge: codeforces
+              judge_label: null
+              period:
+                kind: season
+                season: 2024-2025
+                window: null
+                from: null
+                to: null
+              filter:
+                judges:
+                  - codeforces
+                enrollment_years:
+                  - 2022
+                labels:
+                  - member
+                team_ids: []
+                include_inactive: false
+              visibility: public
+              entry_count: 137
+              generated_at: '2024-05-06T07:00:00.000Z'
+              stale: false
+              next_refresh_at: '2024-05-06T07:15:00.000Z'
+              source_updated_at: '2024-05-06T06:58:00.000Z'
+              revision: '17'
+              created_at: '2024-01-02T03:04:05.000Z'
+              updated_at: '2024-05-06T07:00:00.000Z'
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT15M
+    x-cacheable: true
+  patch:
+    tags:
+      - scoreboards
+    operationId: updateScoreboard
+    summary: 更新榜单定义
+    description: |
+      **权限**：需要 `scoreboard:manage`（或 `scoreboard:*`、`*`）。
+
+      **语义**：合并式更新，只覆盖请求体中出现的字段。修改 `scope`、`metric`、`period`
+      或 `filter` 会改变聚合口径：服务端立即把榜单置为 `stale: true` 并排队重算，
+      因此 `200` 响应中的 `stale` 为 `true`、`generated_at` 仍是上一版物化时刻。
+      仅改 `name`/`description`/`visibility`/`judge_label` 不会触发重算，`stale` 保持原值。
+      重名、或改后与既有榜单的 `scope`+`metric`+`filter` 完全重复返回 `409 conflict`。
+
+      **并发控制**：`If-Match` 携带上次读到的 `ETag`；不匹配返回
+      `412 version_conflict`（`revision` 语义见 `ETag`）。成功响应返回新的 `ETag`。
+
+      **幂等**：必须携带 `Idempotency-Key`；重放返回首次的 `200`，不再重复触发重算。
+
+      **时序**：定义变更强一致并立即可见；聚合字段沿用上一版物化结果，
+      `x-freshness-bound: PT15M`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/boards.yaml#/components/schemas/UpdateScoreboardRequest
+          example:
+            metric: rating_sum
+            filter:
+              judges:
+                - codeforces
+                - atcoder
+              include_inactive: true
+            visibility: members
+    responses:
+      '200':
+        description: 更新后的榜单定义；改变口径时 `stale=true`，等待重算。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/boards.yaml#/components/schemas/Scoreboard
+            example:
+              id: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              name: CF 2024-2025 个人榜
+              description: 跨平台个人积分榜，按累计解题数排名。
+              scope: individual
+              metric: rating_sum
+              judge: codeforces
+              judge_label: null
+              period:
+                kind: season
+                season: 2024-2025
+                window: null
+                from: null
+                to: null
+              filter:
+                judges:
+                  - codeforces
+                  - atcoder
+                enrollment_years: []
+                labels: []
+                team_ids: []
+                include_inactive: true
+              visibility: members
+              entry_count: 137
+              generated_at: '2024-05-06T07:00:00.000Z'
+              stale: true
+              next_refresh_at: '2024-05-06T07:10:00.000Z'
+              source_updated_at: '2024-05-06T06:58:00.000Z'
+              revision: '18'
+              created_at: '2024-01-02T03:04:05.000Z'
+              updated_at: '2024-05-06T07:09:00.000Z'
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT15M
+  delete:
+    tags:
+      - scoreboards
+    operationId: deleteScoreboard
+    summary: 删除榜单
+    description: |
+      **权限**：需要 `scoreboard:manage`（或 `scoreboard:*`、`*`）。对不可见的榜单同样返回 `404`。
+
+      **语义**：删除榜单定义，**同时清理其条目与历史快照**；操作不可撤销（契约不提供
+      恢复端点）。删除后榜单不再出现在任何列表中，也不再被调度刷新。
+
+      **幂等**：必须携带 `Idempotency-Key`。删除成功的记录保留 24 小时：同一 id 的重复
+      `DELETE`，含同一幂等键重放都返回 `204`，不会因为"已删除"而报错；从未存在或对
+      调用者不可见的 id 返回 `404`。
+
+      **时序**：强一致；返回 `204` 后定义与条目均已不可读。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    responses:
+      '204':
+        $ref: ../components/responses/common.yaml#/components/responses/NoContent
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+scoreboardEntries:
+  parameters:
+    - name: scoreboard_id
+      in: path
+      required: true
+      description: 榜单 id，前缀 `sbd_`。
+      schema:
+        $ref: ../components/schemas/common.yaml#/components/schemas/Id
+      example: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+  get:
+    tags:
+      - scoreboards
+    operationId: listScoreboardEntries
+    summary: 列出榜单排名条目
+    description: |
+      **权限**：公开读。匿名可读仅当 `capabilities.public_read=true` 且榜单
+      `visibility=public`；否则需要认证并持有 `scoreboard:read`。榜单不可见或不存在返回 `404`。
+
+      **过滤**：`q` 按展示名/OJ handle 模糊匹配，`team_id`、`judge`、`enrollment_year`
+      收窄集合，`min_rank`/`max_rank` 按名次区间截取（闭区间，含端点）。
+
+      **排序**：`sort` 支持 `rank`，默认、`score`、`solved_count`、`rating`、
+      `activity_days`；`order` 默认 `asc`。**`sort=rank` 时忽略 `order`**，恒按名次升序
+      （并列名次的相对顺序按 `id` 稳定）。榜单条目数可能很大，务必配合 `page`/`size`
+      翻页（`size` 上限 200）。
+
+      **时序**：条目是**物化聚合**，返回值可能落后于采集写入。响应顶层的 `generated_at`
+      是本页数据的物化时刻、`stale` 表示已超出新鲜度上界 `PT15M`；落后超上界应触发
+      `POST /scoreboards/{scoreboard_id}/rebuild`。`rank_delta` 给出相对上一次物化的
+      名次变化。
+    security:
+      - {}
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Page
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Size
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Order
+      - name: q
+        in: query
+        required: false
+        description: 按条目展示名或主体绑定的 OJ handle 做模糊匹配。
+        schema:
+          type: string
+          maxLength: 64
+        example: zhang
+      - name: team_id
+        in: query
+        required: false
+        description: 仅返回属于该队伍的条目（`scope=individual` 时按成员所属队伍过滤）。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: judge
+        in: query
+        required: false
+        description: 仅返回在该平台有数据的条目。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Judge
+        example: codeforces
+      - name: enrollment_year
+        in: query
+        required: false
+        description: 仅返回该入学年份的条目（`scope=team` 时按队伍成员的入学年份过滤）。
+        schema:
+          type: integer
+          minimum: 1990
+          maximum: 2100
+        example: 2022
+      - name: min_rank
+        in: query
+        required: false
+        description: 名次下界，含，从 1 开始。
+        schema:
+          type: integer
+          minimum: 1
+        example: 1
+      - name: max_rank
+        in: query
+        required: false
+        description: 名次上界，含；小于 `min_rank` 时返回 `422`。
+        schema:
+          type: integer
+          minimum: 1
+        example: 50
+      - name: sort
+        in: query
+        required: false
+        description: |
+          排序字段，默认 `rank`。`sort=rank` 时忽略 `order` 恒为升序。
+        schema:
+          type: string
+          enum:
+            - rank
+            - score
+            - solved_count
+            - rating
+            - activity_days
+          default: rank
+        example: rank
+    responses:
+      '200':
+        description: 榜单条目分页结果，含物化时刻与新鲜度。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/boards.yaml#/components/schemas/PagedScoreboardEntry
+            example:
+              page: 1
+              size: 20
+              total: 137
+              has_next: true
+              generated_at: '2024-05-06T07:00:00.000Z'
+              stale: false
+              items:
+                - id: sbe_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+                  scoreboard_id: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  rank: 1
+                  display_name: 李四
+                  principal:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X2
+                    username: lisi
+                    display_name: 李四
+                    kind: human
+                  team:
+                    id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    name: DMU-1
+                  score: 1024
+                  metric: solved_count
+                  solved_count: 1024
+                  penalty: null
+                  activity_days: 118
+                  rating: 1901
+                  rating_delta: 66
+                  rank_delta: 1
+                  per_judge:
+                    - judge: codeforces
+                      rating: 1901
+                      max_rating: 1955
+                      solved_count: 1024
+                      submissions: 2870
+                      rating_delta_30d: 66
+                      last_accepted_at: '2024-05-06T02:11:00.000Z'
+                  updated_at: '2024-05-06T07:00:00.000Z'
+                - id: sbe_01J8Z5V6Q0K3M7N9P2R4T6W8X3
+                  scoreboard_id: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  rank: 2
+                  display_name: 张三
+                  principal:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  team: null
+                  score: 812
+                  metric: solved_count
+                  solved_count: 812
+                  penalty: null
+                  activity_days: 96
+                  rating: 1873
+                  rating_delta: 42
+                  rank_delta: 2
+                  per_judge:
+                    - judge: codeforces
+                      rating: 1873
+                      max_rating: 1901
+                      solved_count: 812
+                      submissions: 2310
+                      rating_delta_30d: 42
+                      last_accepted_at: '2024-05-05T13:20:00.000Z'
+                  updated_at: '2024-05-06T07:00:00.000Z'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT15M
+    x-cacheable: true
+
+scoreboardEntryHistory:
+  parameters:
+    - name: scoreboard_id
+      in: path
+      required: true
+      description: 榜单 id，前缀 `sbd_`。
+      schema:
+        $ref: ../components/schemas/common.yaml#/components/schemas/Id
+      example: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+    - name: entry_id
+      in: path
+      required: true
+      description: 条目 id（榜单内稳定，随物化刷新而保留）。
+      schema:
+        $ref: ../components/schemas/common.yaml#/components/schemas/Id
+      example: sbe_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+  get:
+    tags:
+      - scoreboards
+    operationId: getScoreboardEntryHistory
+    summary: 获取单个榜单条目的历史序列
+    description: |
+      **权限**：公开读。匿名可读仅当 `capabilities.public_read=true` 且榜单
+      `visibility=public`；否则需要认证并持有 `scoreboard:read`。榜单或条目不存在/不可见时
+      返回 `404 not_found`。
+
+      **语义**：返回该条目在窗口内的历史物化快照。`bucket` 对快照做降采样：同一桶内取
+      最接近桶末的一个快照；`limit` 限制返回点数（从窗口末端向前取，默认 90，最大 365），
+      超出时截断并只返回最近的点。
+
+      **时序**：历史点来自历史物化批次，属于**物化聚合**数据，可能落后于采集写入；
+      `timestamps` 与保留期外更早的快照不会返回，也不会因此报错（只是点更少）。
+      落后超过 `PT15M` 上界时榜单本身应触发
+      `POST /scoreboards/{scoreboard_id}/rebuild`，本次响应不受影响。
+    security:
+      - {}
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: from
+        in: query
+        required: false
+        description: 窗口起点，含；省略时按 `limit` 向前回溯。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-02-06T00:00:00.000Z'
+      - name: to
+        in: query
+        required: false
+        description: 窗口终点，不含；省略时取当前时刻。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-05-06T07:00:00.000Z'
+      - name: bucket
+        in: query
+        required: false
+        description: 降采样粒度，默认 `day`；同一桶内只保留最接近桶末的快照。
+        schema:
+          $ref: ../components/schemas/boards.yaml#/components/schemas/TrendBucket
+        example: day
+      - name: limit
+        in: query
+        required: false
+        description: 返回的最大点数，默认 90，最大 365；超出上限时取上限而不报错。
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 365
+          default: 90
+        example: 90
+    responses:
+      '200':
+        description: 条目历史序列，含服务端解析后的窗口。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/boards.yaml#/components/schemas/ScoreboardEntryHistory
+            example:
+              entry_id: sbe_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+              scoreboard_id: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              points:
+                - at: '2024-03-01T00:00:00.000Z'
+                  rank: 5
+                  score: 744
+                  solved_count: 744
+                  rating: 1801
+                - at: '2024-05-06T07:00:00.000Z'
+                  rank: 3
+                  score: 812
+                  solved_count: 812
+                  rating: 1873
+              window:
+                from: '2024-02-06T00:00:00.000Z'
+                to: '2024-05-06T07:00:00.000Z'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT15M
+    x-cacheable: true
+
+scoreboardRebuild:
+  parameters:
+    - name: scoreboard_id
+      in: path
+      required: true
+      description: 榜单 id，前缀 `sbd_`。
+      schema:
+        $ref: ../components/schemas/common.yaml#/components/schemas/Id
+      example: sbd_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+  post:
+    tags:
+      - scoreboards
+    operationId: rebuildScoreboard
+    summary: 触发榜单重建，异步执行
+    description: |
+      **权限**：需要 `scoreboard:manage`（或 `scoreboard:*`、`*`）。
+
+      **语义**：为榜单排队一次重算任务，返回 `202` 与 `Job` 资源；客户端按
+      `Location` 轮询 `GET /jobs/{job_id}` 直到终态。默认增量重算（只处理自上次物化以来
+      有变化的主体），`full=true` 时忽略增量、直接全量重算。任务成功后 `result` 形如
+      `{"scoreboard_id": ..., "entry_count": ...}`，榜单的 `generated_at` 随之更新、
+      `stale` 归 `false`。
+
+      **并发与幂等**：同一榜单同一时刻只允许一个重建任务；已有任务在跑时返回
+      `409 conflict`（响应头不带 `Location`，客户端应改用 `GET /scoreboards/{id}`
+      观察 `generated_at`/`stale`）。同一榜单重复触发不会产生并发重算；带相同
+      `Idempotency-Key` 的重放返回首次的 `202` 与同一个 `job_id`，不重复排队。
+
+      **时序**：任务入队是强一致的；重建完成前读取端仍可能返回旧条目数据
+      （榜单读端点的 `x-freshness-bound` 为 `PT15M`）。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+      - name: full
+        in: query
+        required: false
+        description: |
+          为 `true` 时忽略增量、直接全量重算（耗时更长，用于修复历史数据或口径变更后
+          的兜底）；默认 `false` 为增量重算。
+        schema:
+          type: boolean
+          default: false
+        example: false
+    responses:
+      '202':
+        description: 重建任务已入队；按 `Retry-After` 轮询 `Location` 指向的任务。
+        headers:
+          Location:
+            $ref: ../components/headers/common.yaml#/components/headers/Location
+          Retry-After:
+            $ref: ../components/headers/common.yaml#/components/headers/RetryAfter
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/components/schemas/Job
+            example:
+              id: job_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              kind: scoreboard_rebuild
+              state: queued
+              progress:
+                percent: 0
+                message: 已入队，等待调度
+              result: null
+              error: null
+              created_at: '2024-05-06T07:08:09.123Z'
+              started_at: null
+              finished_at: null
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong

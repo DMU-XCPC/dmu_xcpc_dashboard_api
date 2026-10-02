@@ -1,0 +1,37 @@
+extends:
+  - recommended
+
+rules:
+  # 契约质量：失败即错误，避免"能解析但不可用"的文档。
+  no-unresolved-refs: error
+  operation-operationId: error
+  operation-operationId-unique: error
+  operation-summary: error
+  operation-description: error
+  operation-4xx-response: error
+  operation-2xx-response: error
+  tag-description: error
+  no-ambiguous-paths: error
+  no-identical-paths: error
+  no-enum-type-mismatch: error
+  no-invalid-media-type-examples: error
+  no-invalid-parameter-examples: error
+  no-server-example.com: off
+  no-required-schema-properties-undefined: error
+  no-schema-type-mismatch: error
+  operation-tag-defined: error
+  path-parameters-defined: error
+  path-declaration-must-exist: error
+  no-path-trailing-slash: error
+  struct: error
+  info-license: error
+
+  # 风格：本项目不追求 Redocly 的全部风格偏好。
+  operation-singular-tag: off
+  request-mime-type: off
+  response-mime-type: off
+  no-unused-components: error
+
+apis:
+  main:
+    root: doc/api/openapi.yaml

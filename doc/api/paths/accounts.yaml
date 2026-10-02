@@ -1,0 +1,912 @@
+accounts:
+  get:
+    tags:
+      - accounts
+    operationId: listAccounts
+    summary: 分页查询账号与主体
+    description: |
+      **用途**：管理界面里的账号列表（人类与机器人都在这里），用于排查"谁有权限、
+      凭证何时用过、哪些账号被停用"。**展示成员、按年级/队伍筛人请用 `GET /members`**。
+      返回主体列表，支持按用户名/展示名/学号模糊搜索与标签、类型、状态、成员过滤。
+
+      **权限**：需要 `account:read`。缺少该 scope 返回 `403 insufficient_scope`；
+      匿名访问返回 `401 unauthenticated`（本端点不公开）。
+
+      **PII 脱敏**：学号、邮箱、电话、QQ 属于个人身份信息。**读自己**或持有
+      `member:read_pii` 时原样返回；否则这些字段返回 `null`，并在
+      `profile.masked_fields` 里列出被隐藏的字段名（见 `PrincipalProfile.masked_fields`）。
+      默认 `user` 模板**不含** `member:read_pii`，管理员模板 `manager` 含。
+
+      **过滤语义**：`q` 对 `username`、`display_name`、`profile.student_id` 做大小写
+      不敏感的**子串**匹配；`label` 可重复出现，多个标签之间是 AND（必须全部命中）；
+      `club` 按社团身份过滤，`label` 按标签过滤；`updated_since` 只返回 `updated_at` 严格晚于
+      该时刻的主体（增量同步用，与 `sort=updated_at&order=asc` 组合可稳定追赶）。
+
+      **排序与分页**：`sort` 默认 `username`，`order` 默认 `asc`；`sort` 相同时以 `id`
+      为稳定次序，保证翻页不重复、不跳过。`page` 越界返回空 `items` 与 `has_next: false`，
+      不返回 `404`。
+
+      **时序**：强一致——响应包含本次请求前已提交的全部写入效果。列表结果可安全缓存
+      （`x-cacheable`），但缓存键必须包含全部查询参数与请求者的权限身份。
+      `total` 只统计该主体的可见集合，不同调用者看到的 `total` 可能不同。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: q
+        in: query
+        required: false
+        description: 对用户名、展示名、学号做大小写不敏感的子串模糊匹配。
+        schema:
+          type: string
+          maxLength: 64
+        example: zhang
+      - name: label
+        in: query
+        required: false
+        description: |
+          标签过滤，可重复出现，例如 `?label=member&label=2022`；多个标签之间为 AND，
+          必须全部命中。标签不授予权限，也不表示成员资格；按社团筛选请用 `club`。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/Label
+        example:
+          - member
+          - '2022'
+      - name: kind
+        in: query
+        required: false
+        description: 只返回指定类型的主体。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/PrincipalKind
+        example: human
+      - name: status
+        in: query
+        required: false
+        description: 只返回指定状态的主体。
+        schema:
+          $ref: ../components/schemas/identity.yaml#/components/schemas/AccountStatus
+        example: active
+      - name: club
+        in: query
+        required: false
+        description: |
+          按社团身份过滤：只返回在指定社团处于 `active` 的主体。可重复传参，匹配方式
+          由 `club_match` 决定。省略时不过滤。**注意**：这不等于 `kind`，机器人也可以
+          注册社团。
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/ClubCode
+          minItems: 1
+          maxItems: 2
+        style: form
+        explode: true
+        example:
+          - acm_icpc
+      - $ref: ../components/parameters/common.yaml#/components/parameters/UpdatedSince
+      - name: club_match
+        in: query
+        required: false
+        description: |
+          与 `club` 组合决定匹配方式，只在给了 `club` 时有意义：
+          `any` 是命中任一社团（默认），`all` 要求同时属于列出的所有社团，
+          `none` 要求不属于其中任何一个。两个社团的名单不同，这三种问法都需要：
+          要"两个社团都注册的人"用 `all`，要"只在软件部、不在学社"可以先按
+          `any` 取并集、再按 `all` 取交集相减，要"完全不在名单里"用
+          `club=safewind_software&club=acm_icpc&club_match=none`。
+        schema:
+          type: string
+          enum:
+            - any
+            - all
+            - none
+          default: any
+        example: all
+      - name: sort
+        in: query
+        required: false
+        description: 排序键，默认 `username`。
+        schema:
+          type: string
+          enum:
+            - username
+            - display_name
+            - created_at
+            - last_active_at
+            - updated_at
+          default: username
+        example: username
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Order
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Page
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Size
+    responses:
+      '200':
+        description: 主体列表（分页）。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/accounts.yaml#/components/schemas/PagedPrincipal
+            example:
+              page: 1
+              size: 20
+              total: 137
+              has_next: true
+              items:
+                - id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  username: alice
+                  display_name: 张三
+                  kind: human
+                  labels:
+                    - member
+                    - '2022'
+                  scopes:
+                    - account:self
+                    - member:read
+                  profile:
+                    student_id: '2220210000'
+                    enrollment_year: 2022
+                    major: 计算机科学与技术
+                    club_memberships:
+                      - club: acm_icpc
+                        status: active
+                        registered_at: '2023-09-20'
+                        role: 成员
+                  status: active
+                  last_active_at: '2024-05-06T07:08:09.123Z'
+                  created_at: '2023-09-01T02:00:00.000Z'
+                  updated_at: '2024-05-06T07:08:09.123Z'
+                  revision: '17'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+
+  post:
+    tags:
+      - accounts
+    operationId: createAccount
+    summary: 新建主体，人类账号或 service
+    description: |
+      创建 `human` 自然人或 `service` 机器人/采集器/Agent，并可选地设置初始标签、
+      scope、档案与口令。
+
+      **权限**：需要 `account:manage`。初始 `scopes` 不得超出调用者自身的 scopes
+      （否则 `403 insufficient_scope`）；`password` 只对 `kind: human` 合法。
+
+      **冲突**：`username` 与 `profile.student_id` 全局唯一，冲突返回
+      `409 conflict`（`detail` 指出冲突字段与既有主体 id）。请求未通过语义校验返回
+      `422 validation_failed`（`errors[]` 给出字段级原因）。
+
+      **副作用**：创建成功返回 `201`，`Location` 指向 `GET /accounts/{account_id}`，
+      `ETag` 为该主体初始 `revision`。创建本身不签发任何凭证；如需凭证请再调用
+      `POST /accounts/{account_id}/credentials`。若携带 `status: disabled` 创建，主体
+      立即处于停用态且无有效凭证。
+
+      **幂等性**：必须携带 `Idempotency-Key`。同一主体 + 同一端点 + 同一键在保留期
+      内重放返回**首次**的 `201` 响应并带 `Idempotency-Replayed: true`，不会重复创建；
+      键相同但请求体不同返回 `409 idempotency_key_reused`。
+
+      **并发**：以 `username`/`student_id` 的唯一约束做最终仲裁，并发创建同名主体时
+      只有一个成功，其余返回 `409 conflict`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      description: 新主体定义；`username`、`display_name`、`kind` 必填。
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/accounts.yaml#/components/schemas/CreateAccountRequest
+          example:
+            username: bob
+            display_name: 李四
+            kind: human
+            labels:
+              - member
+              - '2023'
+            scopes:
+              - account:self
+              - member:read
+              - oj:read
+            profile:
+              student_id: '2320210001'
+              enrollment_year: 2023
+              major: 软件工程
+            password: correct-horse-battery-staple
+            status: active
+    responses:
+      '201':
+        description: 创建成功，返回新主体。
+        headers:
+          Location:
+            $ref: ../components/headers/common.yaml#/components/headers/Location
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/identity.yaml#/components/schemas/Principal
+            example:
+              id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              username: bob
+              display_name: 李四
+              kind: human
+              labels:
+                - member
+                - '2023'
+              scopes:
+                - account:self
+                - member:read
+                - oj:read
+              profile:
+                student_id: '2320210001'
+                enrollment_year: 2023
+                grade: 2023级
+                major: 软件工程
+                club_memberships:
+                  - club: safewind_software
+                    status: active
+                    registered_at: '2023-09-20'
+                    role: 干事
+              status: active
+              disabled_at: null
+              last_active_at: null
+              created_at: '2024-05-06T07:08:09.123Z'
+              updated_at: '2024-05-06T07:08:09.123Z'
+              revision: '1'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+account:
+  get:
+    tags:
+      - accounts
+    operationId: getAccount
+    summary: 获取单个主体
+    description: |
+      返回主体的完整档案，含 `labels`、`scopes`、`profile`、状态与版本标记。
+
+      **权限**：需要 `account:read`。主体不存在**或**对调用者不可见时统一返回
+      `404 not_found`，不区分二者以避免枚举。
+
+      **缓存与并发**：响应带强 `ETag`（等于 `revision`）。带 `If-None-Match` 且与当前
+      `ETag` 相同返回 `304 Not Modified`（无响应体）；把该 `ETag` 原值用于
+      `PATCH /accounts/{account_id}` 的 `If-Match` 即可实现乐观并发控制。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: account_id
+        in: path
+        required: true
+        description: 目标主体的 id，前缀 `acc_`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 主体详情。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/identity.yaml#/components/schemas/Principal
+            example:
+              id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              username: alice
+              display_name: 张三
+              kind: human
+              labels:
+                - member
+                - '2022'
+              scopes:
+                - account:self
+                - member:read
+                - oj:read
+              profile:
+                student_id: '2220210000'
+                enrollment_year: 2022
+                grade: 2022级
+                major: 计算机科学与技术
+                club_memberships:
+                  - club: acm_icpc
+                    status: active
+                    registered_at: '2023-09-20'
+                    role: 成员
+                email: alice@example.edu.cn
+              status: active
+              disabled_at: null
+              last_active_at: '2024-05-06T07:08:09.123Z'
+              created_at: '2023-09-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:08:09.123Z'
+              revision: '17'
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+
+  patch:
+    tags:
+      - accounts
+    operationId: updateAccount
+    summary: 修改主体的展示名、档案与状态
+    description: |
+      部分更新主体：`display_name` 与 `status` 整体替换，`profile` 为合并式更新
+      （只覆盖出现的字段，显式 `null` 清空该字段）。请求体至少包含一个字段。
+
+      **权限**：需要 `account:manage`。
+
+      **状态机**：只允许 `active ⇄ disabled`。置为 `disabled` 会**同时撤销该主体的全部
+      凭证**（`session` 与 `api_key`），既有令牌在 ≤ 60 秒后一律失效；`disabled → active`
+      只恢复主体自身，**不会**恢复任何已撤销的凭证，需要重新签发。**禁止把自己停用**：
+      对自己提交 `status: disabled` 返回 `409 conflict`，`detail` 说明「不能停用当前
+      调用者自身，请由其他 `account:manage` 主体执行」。
+
+      **并发控制**：建议携带 `If-Match`（上次 `GET` 的 `ETag` 原值）。不匹配返回
+      `412 precondition_failed`，响应体的 `detail` 给出期望与当前 `revision`；
+      `If-Match: *` 表示只要求主体存在。成功后返回新的 `ETag`/`revision`，旧 `ETag`
+      立即失效。
+
+      **幂等性**：必须携带 `Idempotency-Key`；同一键重放返回首次的响应与同一个
+      `ETag`，不产生第二次副作用（重复把已停用主体置为 `disabled` 也是幂等的）。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: account_id
+        in: path
+        required: true
+        description: 目标主体的 id，前缀 `acc_`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      description: 待修改字段；至少一个。
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/accounts.yaml#/components/schemas/UpdateAccountRequest
+          example:
+            display_name: 张三（队长）
+            profile:
+              major: 软件工程
+            status: active
+    responses:
+      '200':
+        description: 更新后的主体（已包含本次写入效果）。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/identity.yaml#/components/schemas/Principal
+            example:
+              id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              username: alice
+              display_name: 张三（队长）
+              kind: human
+              labels:
+                - member
+                - '2022'
+              scopes:
+                - account:self
+                - member:read
+              profile:
+                student_id: '2220210000'
+                enrollment_year: 2022
+                grade: 2022级
+                major: 软件工程
+                club_memberships:
+                  - club: safewind_software
+                    status: active
+                    registered_at: '2023-09-20'
+                    role: 干事
+              status: active
+              disabled_at: null
+              last_active_at: '2024-05-06T07:08:09.123Z'
+              created_at: '2023-09-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:30:00.000Z'
+              revision: '18'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+  delete:
+    tags:
+      - accounts
+    operationId: disableAccount
+    summary: 停用主体，可选同时清除档案
+    description: |
+      **停用而非物理删除**：主体转为 `status: disabled`，历史数据保留——成员名单、榜单与
+      统计仍可引用其历史成绩，其 OJ 绑定保持**只读可见**（`GET /oj-handles` 与
+      `GET /oj-handles/{handle_id}` 仍返回该绑定与已采集数据，但 `owner` 侧不再允许写入）。
+
+      **权限**：需要 `account:manage`。查询参数 `purge` 默认 `false`；`purge=true` 表示
+      额外清除个人档案（联系方式、备注等）与 `profile.student_id` 唯一占用，**此操作
+      不可撤销**，且要求调用者额外持有通配 `*` scope，否则返回 `403 insufficient_scope`。
+
+      **副作用**：停用会**同时撤销该主体的全部凭证**（`session` 与 `api_key`），
+      已签发的令牌在 ≤ 60 秒内一律失效；正在使用中的令牌不会即刻中断，客户端应在收到
+      `401 invalid_token` 后清理本地令牌。停用后不可在本端点恢复，恢复需用
+      `PATCH /accounts/{account_id}` 设置 `status: active`（且不恢复凭证）。
+
+      **幂等性**：总是返回 `204`——重复删除、删除已停用主体同样返回 `204`，
+      不区分「本次真的停用了」与「本来就已经停用」。必须携带 `Idempotency-Key`，
+      同一键重放返回首次结果并带 `Idempotency-Replayed: true`。
+
+      **并发**：与 `PATCH` 竞争时以最后一次提交为准；可用 `If-Match` 加 `revision`
+      前置校验（不匹配返回 `412 precondition_failed`）。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: account_id
+        in: path
+        required: true
+        description: 目标主体的 id，前缀 `acc_`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+      - name: purge
+        in: query
+        required: false
+        description: |
+          为 `true` 时在停用的同时清除个人档案（不可撤销），需要额外持有 `*` scope；
+          默认 `false` 只停用、保留全部数据。
+        schema:
+          type: boolean
+          default: false
+        example: false
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    responses:
+      '204':
+        $ref: ../components/responses/common.yaml#/components/responses/NoContent
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+accountLabels:
+  put:
+    tags:
+      - accounts
+    operationId: setAccountLabels
+    summary: 替换主体的标签集合
+    description: |
+      以**替换语义**设置标签：请求体 `labels` 成为该主体的完整标签集合，未出现的旧标签
+      被删除；传空数组即清空。标签不授予权限，也不决定成员资格；增删标签不会影响
+      成员名单与导出结果。
+
+      **权限**：需要 `member:assign`（标签用于组织成员，因此不复用 `account:manage`）。
+
+      **并发控制**：建议携带 `If-Match`（上次 `GET` 的 `ETag` 原值），不匹配返回
+      `412 precondition_failed`；成功后 `revision` 递增并返回新 `ETag`。
+
+      **幂等性**：替换语义天然幂等——重复提交同一集合不改变最终状态；仍必须携带
+      `Idempotency-Key`，同键重放返回首次响应并带 `Idempotency-Replayed: true`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: account_id
+        in: path
+        required: true
+        description: 目标主体的 id，前缀 `acc_`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      description: 完整的目标标签集合（替换语义）。
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/accounts.yaml#/components/schemas/SetLabelsRequest
+          example:
+            labels:
+              - member
+              - '2022'
+              - team-captain
+    responses:
+      '200':
+        description: 更新后的主体，含新的标签集合与 `ETag`。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/identity.yaml#/components/schemas/Principal
+            example:
+              id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              username: alice
+              display_name: 张三
+              kind: human
+              labels:
+                - member
+                - '2022'
+                - team-captain
+              scopes:
+                - account:self
+                - member:read
+              status: active
+              created_at: '2023-09-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:40:00.000Z'
+              revision: '18'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+accountScopes:
+  put:
+    tags:
+      - accounts
+    operationId: setAccountScopes
+    summary: 替换主体的 scope 集合
+    description: |
+      以**替换语义**设置 scope：请求体 `scopes` 成为该主体的完整 scope 列表，未出现的
+      旧 scope 被撤销，传空数组即撤销全部（包括 `account:self`）。
+
+      **权限**：需要 `member:assign`，并且**不得授予自己不具备的 scope**——请求中出现
+      调用者自身没有的 scope，含未展开的通配时返回 `403 insufficient_scope`，
+      `detail` 列出超出部分；通配 `*` 只能由已持有 `*` 的主体授予。
+
+      **生效时序**：强一致且无传播延迟。已签发凭证的实际生效权限始终是
+      「主体 scopes ∩ 凭证 scopes」，因此缩减主体 scopes 会**立即**缩小既有凭证的
+      有效权限；恢复 scope 不会自动恢复此前因交集缩小而失去的凭证权限（凭证自身的
+      scopes 未被修改）。
+
+      **并发控制**：建议携带 `If-Match`；不匹配返回 `412 precondition_failed`。
+      本端点忽略主体状态：对已停用主体设置 scopes 会成功但不会使其凭证复活。
+
+      **幂等性**：替换语义幂等；仍必须携带 `Idempotency-Key`，同键重放返回首次响应。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: account_id
+        in: path
+        required: true
+        description: 目标主体的 id，前缀 `acc_`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      description: 完整的目标 scope 集合（替换语义）。
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/accounts.yaml#/components/schemas/SetScopesRequest
+          example:
+            scopes:
+              - account:self
+              - member:read
+              - oj:read
+              - oj:write
+    responses:
+      '200':
+        description: 更新后的主体，含新的 scope 集合与 `ETag`。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/identity.yaml#/components/schemas/Principal
+            example:
+              id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              username: alice
+              display_name: 张三
+              kind: human
+              labels:
+                - member
+              scopes:
+                - account:self
+                - member:read
+                - oj:read
+                - oj:write
+              status: active
+              created_at: '2023-09-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:45:00.000Z'
+              revision: '18'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+accountPassword:
+  post:
+    tags:
+      - accounts
+    operationId: resetAccountPassword
+    summary: 设置或重置某个主体的口令
+    description: |
+      **用途**：给还没有口令的主体设置初始口令，或为忘记口令的主体重置。批量导入
+      （`POST /members/import`）与 `POST /accounts` 创建出来的主体**初始没有口令**，
+      成员本人无法登录，管理员用本端点补上第一条口令；之后成员就能用
+      `PUT /auth/me/password` 自行修改。
+
+      **权限**：需要 `account:manage`。**不能**用它修改自己的口令——自助改口令走
+      `PUT /auth/me/password`，那条路径要求提供当前口令。
+
+      **语义**：请求体里的 `password` 立即生效，长度需满足 `Config.auth.password_min_length`
+      （默认 12）。管理员**不需要**知道旧口令。
+
+      **副作用**：撤销该主体**全部** `session` 凭证（正在使用的会话也会失效），
+      `api_key` 凭证不受影响；写审计记录，且**不记录口令本身**。
+      主体已停用返回 `409 conflict`，需先恢复为 `active`。
+
+      **幂等**：必须携带 `Idempotency-Key`；同键重放返回首次结果，不会重复撤销会话。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: account_id
+        in: path
+        required: true
+        description: 目标主体 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/ResetPasswordRequest
+          example:
+            password: correct-horse-battery-staple
+    responses:
+      '204':
+        description: |
+          口令已生效；该主体全部 `session` 凭证已撤销（改用新口令重新登录）。
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+accountCredentials:
+  post:
+    tags:
+      - accounts
+    operationId: issueCredential
+    summary: 为主体签发凭证
+    description: |
+      签发 `session` 或 `api_key` 凭证。**明文 `secret` 只在本响应的 201 中出现一次**，
+      之后任何接口都不再返回；服务端只保存哈希，丢失后只能重新签发。
+
+      **权限**：给自己签发（`account_id` 等于当前主体）需要 `account:self`；
+      给他人签发需要 `account:manage`。两者都不满足返回 `403 insufficient_scope`。
+
+      **scope 约束**：请求体显式给出 `scopes` 时不得超过签发者自身的 scopes，否则返回
+      `403 insufficient_scope`（`detail` 列出超出部分）；省略 `scopes` 时新凭证继承
+      「主体 scopes ∩ 签发者 scopes」。签发者无法通过本端点提权。
+
+      **有效期**：`expires_at` 与 `expires_in` 互斥（同时给出 `422 validation_failed`）；
+      都不给时 `api_key` 不过期、`session` 用服务端默认值。对已停用主体签发返回
+      `409 conflict`（停用主体不得持有有效凭证）。
+
+      **副作用**：成功返回 `201`，`Location` 指向 `GET /credentials/{credential_id}`，
+      `ETag` 为该凭证版本。签发会写入审计日志，签发者记为 `created_by`。
+      若目标主体是调用者自己，本端点**不会**撤销当前正在使用的凭证。
+
+      **幂等性**：必须携带 `Idempotency-Key`。同键重放返回首次的 201 与**同一个**
+      secret，仅在保留期内，不会重复签发；键相同但请求体不同返回
+      `409 idempotency_key_reused`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: account_id
+        in: path
+        required: true
+        description: 凭证归属主体的 id，前缀 `acc_`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      description: 凭证定义；`kind` 与 `name` 必填。
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/accounts.yaml#/components/schemas/IssueCredentialRequest
+          example:
+            kind: api_key
+            name: qq-bot
+            scopes:
+              - announcement:write
+            expires_in: 7776000
+            description: QQ 机器人专用，只允许草拟与写公告
+    responses:
+      '201':
+        description: 签发成功；`secret` 仅此一次返回，请立即保存。
+        headers:
+          Location:
+            $ref: ../components/headers/common.yaml#/components/headers/Location
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/identity.yaml#/components/schemas/IssuedCredential
+            example:
+              id: cred_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              kind: api_key
+              name: qq-bot
+              prefix: xcp_7f3a
+              scopes:
+                - announcement:write
+              created_at: '2024-05-06T08:00:00.000Z'
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              expires_at: '2024-08-04T08:00:00.000Z'
+              last_used_at: null
+              revoked_at: null
+              secret: xcp_7f3aQ0K3M7N9P2R4T6W8X0abcdef
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong

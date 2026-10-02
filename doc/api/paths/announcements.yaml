@@ -1,0 +1,1083 @@
+announcements:
+  get:
+    tags:
+      - announcements
+    operationId: listAnnouncements
+    summary: 列出新闻板公告
+    description: |
+      按过滤条件分页列出公告，新闻板首页与机器人拉取都走本端点。
+
+      **权限与可见性**：分三档。
+      匿名请求只在服务器 `capabilities.public_read=true` 时被接受，且只能看到
+      `status=published` 且 `visibility=public` 的公告；已认证但缺少 `announcement:read`
+      的主体可以额外看到 `visibility=members` 的公告；具备 `announcement:read`（或 `announcement:publish`）的主体可以看到
+      `draft`、`scheduled`、`expired`、`archived` 与 `visibility=private` 的公告。
+      过滤条件不会"提权"：`status=draft` 对无权者返回空集合而不是 403。
+
+      **过滤**：`status`、`category`、`tag`，可重复，命中任一、`pinned`、`q`
+      （标题与正文模糊匹配）、`published_after`、`updated_since`
+      （严格晚于给定时时刻，用于增量同步）。
+
+      **排序**：`sort` 支持 `published_at`，默认，未发布公告排在最后、`created_at`、
+      `updated_at`、`priority`（`low < normal < high < urgent`），方向由 `order` 决定。
+      置顶公告始终排在非置顶之前，与 `sort` 无关。
+
+      **缓存**：结果可安全缓存（`x-cacheable`），但使用 `updated_since` 增量模式时
+      响应不可用 `ETag` 复用。
+    security:
+      - {}
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: status
+        in: query
+        required: false
+        description: 按状态过滤；对无权读取该状态的主体等同于过滤掉全部条目。
+        schema:
+          $ref: ../components/schemas/news.yaml#/components/schemas/AnnouncementStatus
+        example: published
+      - name: category
+        in: query
+        required: false
+        description: 按分类精确过滤。
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 40
+        example: training
+      - name: tag
+        in: query
+        required: false
+        style: form
+        explode: true
+        description: 按标签过滤；可重复传参（`?tag=训练&tag=通知`），命中任一标签即返回。
+        schema:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 40
+        example:
+          - 训练
+      - name: pinned
+        in: query
+        required: false
+        description: 只返回置顶公告传 `true`，只返回非置顶公告传 `false`；省略时不过滤。
+        schema:
+          type: boolean
+        example: true
+      - name: q
+        in: query
+        required: false
+        description: 标题与正文的模糊搜索关键字；对 Markdown 源码做大小写不敏感匹配。
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 100
+        example: 集训
+      - name: published_after
+        in: query
+        required: false
+        description: 只返回 `published_at` **严格晚于**该时刻的已发布公告。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-05-01T00:00:00.000Z'
+      - $ref: ../components/parameters/common.yaml#/components/parameters/UpdatedSince
+      - name: sort
+        in: query
+        required: false
+        description: |
+          排序键。`priority` 按 `low < normal < high < urgent` 排序；
+          `published_at` 时未发布公告排在最后（nulls last）。
+        schema:
+          type: string
+          enum:
+            - published_at
+            - created_at
+            - updated_at
+            - priority
+          default: published_at
+        example: published_at
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Order
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Page
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Size
+    responses:
+      '200':
+        description: 公告分页结果；`items` 只包含调用者可见的公告。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/PagedAnnouncement
+            example:
+              page: 1
+              size: 20
+              total: 1
+              has_next: false
+              items:
+                - id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  title: 2024 暑期集训安排
+                  body_markdown: '## 时间：7 月 8 日起每周一、三、五 14:00 在 A301 训练。'
+                  category: training
+                  tags:
+                    - 训练
+                    - 通知
+                  priority: normal
+                  pinned: true
+                  status: published
+                  visibility: members
+                  publish_at: null
+                  published_at: '2024-05-06T07:08:09.123Z'
+                  expires_at: null
+                  archived_at: null
+                  source:
+                    kind: manual
+                  dedup_key: null
+                  broadcast_on_publish: true
+                  broadcast_channel_ids:
+                    - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  author: null
+                  created_by:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  delivery_summary:
+                    pending: 0
+                    sent: 2
+                    failed: 1
+                  created_at: '2024-05-06T07:00:00.000Z'
+                  updated_at: '2024-05-06T07:08:09.123Z'
+                  revision: '3'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+  post:
+    tags:
+      - announcements
+    operationId: createAnnouncement
+    summary: 创建公告，供 Agent 与机器人主动推送
+    description: |
+      外部 Agent、QQ 机器人与采集脚本**主动推送**通知的入口；推送即入库，
+      **没有审核队列**：是否需要人工复核由推送方自行负责。
+
+      **权限**：需要 `announcement:write`。`publish=true` 时**额外**需要
+      `announcement:publish`，否则返回 `403 insufficient_scope`（不会静默降级为草稿）；
+      `broadcast=true` 时还需要 `channel:manage`。
+
+      **状态与时序**：
+      `publish=false`，默认→ 公告以 `draft` 落库，仅具备 `announcement:read`
+      权限的主体可见；
+      `publish=true` 且 `publish_at` 为空或已过去 → 立即 `published`，并发出
+      `announcement.published` SSE 事件；
+      `publish=true` 且 `publish_at` 为未来时刻 → `scheduled`，到点由服务器自动发布，
+      客户端无需轮询。
+      `expires_at` 到点后服务器自动把 `published` 置为 `expired`。
+
+      **去重与幂等**：带 `dedup_key` 时，在**7 天**窗口内按 `(dedup_key 作用域, title,
+      body)` 判定重复——
+      - `201`：本次确实新建；
+      - `200`：同一个 `dedup_key` 且**内容相同**，命中去重，响应体是已存在的公告
+        （`Idempotency-Replayed` 不置位），不重复广播；
+      - `409 dedup_conflict`：同一个 `dedup_key` 但**内容不同**，服务端不会覆盖既有公告，
+        提示调用方换一个 `dedup_key`（例如追加时间戳）或先撤回原公告；
+      - 携带 `Idempotency-Key` 的网络重放返回首次的响应，与去重是两套独立机制。
+
+      **副作用**：`publish=true` 且 `broadcast=true` 时，广播被排成异步任务，
+      发布响应中的 `delivery_summary` 立即反映待投递数量，实际投递结果异步更新；
+      逐条状态见 `GET /announcements/{announcement_id}/deliveries`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/news.yaml#/components/schemas/CreateAnnouncementRequest
+          example:
+            title: 2024 暑期集训安排
+            body_markdown: '## 时间：7 月 8 日起每周一、三、五 14:00 在 A301 训练。'
+            category: training
+            tags:
+              - 训练
+            priority: normal
+            visibility: members
+            publish: true
+            publish_at: '2024-05-07T00:00:00.000Z'
+            broadcast: true
+            channel_ids:
+              - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            dedup_key: qq-group-884210
+            source:
+              kind: group_chat
+              platform: qq
+              group_name: DMU-ICPC-2024
+              message_id: '884210'
+              confidence: 0.82
+    responses:
+      '201':
+        description: 公告已创建；`Location` 指向新资源，`ETag` 为其 `revision`。
+        headers:
+          Location:
+            $ref: ../components/headers/common.yaml#/components/headers/Location
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/Announcement
+            example:
+              id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              title: 2024 暑期集训安排
+              body_markdown: '## 时间：7 月 8 日起每周一、三、五 14:00 在 A301 训练。'
+              category: training
+              tags:
+                - 训练
+              priority: normal
+              pinned: false
+              status: scheduled
+              visibility: members
+              publish_at: '2024-05-07T00:00:00.000Z'
+              published_at: null
+              expires_at: null
+              archived_at: null
+              source:
+                kind: group_chat
+                platform: qq
+                group_name: DMU-ICPC-2024
+                message_id: '884210'
+                raw_text: null
+                collected_at: null
+                confidence: 0.82
+              dedup_key: qq-group-884210
+              broadcast_on_publish: true
+              broadcast_channel_ids:
+                - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              author: null
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: qq-bot
+                display_name: QQ 机器人
+                kind: service
+              delivery_summary:
+                pending: 1
+                sent: 0
+                failed: 0
+              created_at: '2024-05-06T07:08:09.123Z'
+              updated_at: '2024-05-06T07:08:09.123Z'
+              revision: '1'
+      '200':
+        description: |
+          命中去重键：7 天内已存在相同 `dedup_key` 的公告，本次**未创建**新资源，
+          返回既有公告（其内容不会被本次请求覆盖）。
+        headers:
+          Location:
+            $ref: ../components/headers/common.yaml#/components/headers/Location
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/Announcement
+            example:
+              id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+              title: 2024 暑期集训安排
+              body_markdown: '## 时间：7 月 8 日起每周一、三、五 14:00 在 A301 训练。'
+              category: training
+              tags:
+                - 训练
+              priority: normal
+              pinned: false
+              status: published
+              visibility: members
+              publish_at: null
+              published_at: '2024-05-05T07:00:00.000Z'
+              expires_at: null
+              archived_at: null
+              source:
+                kind: group_chat
+              dedup_key: qq-group-884210
+              broadcast_on_publish: true
+              broadcast_channel_ids:
+                - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              author: null
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: qq-bot
+                display_name: QQ 机器人
+                kind: service
+              delivery_summary:
+                pending: 0
+                sent: 1
+                failed: 0
+              created_at: '2024-05-05T07:00:00.000Z'
+              updated_at: '2024-05-05T07:00:01.000Z'
+              revision: '1'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '413':
+        $ref: ../components/responses/common.yaml#/components/responses/PayloadTooLarge
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+announcement:
+  get:
+    tags:
+      - announcements
+    operationId: getAnnouncement
+    summary: 获取单个公告
+    description: |
+      读取公告详情。
+
+      **可见性**：与列表一致——匿名（在 `capabilities.public_read=true` 时）只能读取
+      `visibility` 为 `public`/`members` 且 `status=published` 的公告；`status=draft`
+      或 `visibility=private` 的公告对无权者返回 `404 not_found`，而不是 403，
+      避免通过状态码枚举出草稿的存在。
+
+      **缓存**：响应带强 `ETag`（等于 `revision`）；`If-None-Match` 命中返回 `304`，
+      正文修改，含已发布公告会改变 `revision` 与 `ETag`。
+    security:
+      - {}
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: announcement_id
+        in: path
+        required: true
+        description: 公告 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 公告详情。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Cache-Control:
+            description: 匿名可读公告允许短时公共缓存；私有/草稿为 `private, no-store`。
+            schema:
+              type: string
+            example: public, max-age=60
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/Announcement
+            example:
+              id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              title: 2024 暑期集训安排
+              body_markdown: '## 时间：7 月 8 日起每周一、三、五 14:00 在 A301 训练。'
+              category: training
+              tags:
+                - 训练
+              priority: normal
+              pinned: true
+              status: published
+              visibility: members
+              publish_at: null
+              published_at: '2024-05-06T07:08:09.123Z'
+              expires_at: null
+              archived_at: null
+              source:
+                kind: manual
+              dedup_key: null
+              broadcast_on_publish: false
+              broadcast_channel_ids: []
+              author: null
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              delivery_summary: null
+              created_at: '2024-05-06T07:00:00.000Z'
+              updated_at: '2024-05-06T07:08:09.123Z'
+              revision: '3'
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+  patch:
+    tags:
+      - announcements
+    operationId: updateAnnouncement
+    summary: 局部更新公告
+    description: |
+      修改公告的标题、正文、分类、标签、优先级、置顶、可见性、定时/过期时间与广播目标。
+
+      **权限**：`announcement:write`。修改广播目标（`broadcast`/`channel_ids`）需要
+      `channel:manage`。改 `pinned` 时受 `announcements.max_pinned` 限制，超限返回
+      `409 conflict`。
+
+      **已发布公告可改正文**：允许，且会提升 `revision` 并向 SSE 推送
+      `announcement.updated` 事件（`data` 含新 `revision`），订阅方据此刷新本地副本。
+      但 `publish_at` 在 `published` 状态下不可再改（返回 `409 conflict`）。
+
+      **并发控制**：带 `If-Match` 时以 `revision` 做乐观锁，不匹配返回
+      `412 precondition_failed`；不带 `If-Match` 时以"最后写入胜出"处理。
+      携带 `Idempotency-Key` 的网络重放返回首次响应，不会重复提升 `revision`。
+
+      **副作用**：修改广播目标只影响**后续**发布/广播，不会自动重发已发出的投递。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: announcement_id
+        in: path
+        required: true
+        description: 公告 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/news.yaml#/components/schemas/UpdateAnnouncementRequest
+          example:
+            body_markdown: '## 时间：改为 7 月 9 日起每周二、四 14:00 在 A301 训练。'
+            tags:
+              - 训练
+              - 通知
+            pinned: true
+    responses:
+      '200':
+        description: 更新后的公告；`revision` 已提升，`ETag` 为最新值。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/Announcement
+            example:
+              id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              title: 2024 暑期集训安排
+              body_markdown: '## 时间：改为 7 月 9 日起每周二、四 14:00 在 A301 训练。'
+              category: training
+              tags:
+                - 训练
+                - 通知
+              priority: normal
+              pinned: true
+              status: published
+              visibility: members
+              publish_at: null
+              published_at: '2024-05-06T07:08:09.123Z'
+              expires_at: null
+              archived_at: null
+              source:
+                kind: manual
+              dedup_key: null
+              broadcast_on_publish: true
+              broadcast_channel_ids:
+                - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              author: null
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              delivery_summary:
+                pending: 0
+                sent: 2
+                failed: 1
+              created_at: '2024-05-06T07:00:00.000Z'
+              updated_at: '2024-05-06T07:30:00.000Z'
+              revision: '4'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+  delete:
+    tags:
+      - announcements
+    operationId: deleteAnnouncement
+    summary: 删除公告，默认归档
+    description: |
+      **默认行为是归档而不是物理删除**：`status` 置为 `archived`（终态，不可逆），
+      历史投递记录与审计保留，新闻板不再展示。归档需要 `announcement:write`。
+
+      `purge=true` 时执行**物理删除**：资源、投递记录与统计一并清除，不可恢复；
+      该模式需要 `announcement:publish`，否则返回 `403 insufficient_scope`。
+
+      **幂等**：重复调用总是返回 `204`——已归档的公告再次归档、已删除的公告再次
+      删除都不报错（`404` 仅在 id 从未存在时返回）。
+
+      **副作用**：归档/删除不会撤销已完成的广播投递（消息已在群里），
+      但会终止尚未投递的排队投递（其 `state` 变为 `skipped`）。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: announcement_id
+        in: path
+        required: true
+        description: 公告 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: purge
+        in: query
+        required: false
+        description: |
+          为 `true` 时物理删除该公告及其投递记录，需要 `announcement:publish`；
+          默认 `false`，仅归档。
+        schema:
+          type: boolean
+          default: false
+        example: false
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    responses:
+      '204':
+        $ref: ../components/responses/common.yaml#/components/responses/NoContent
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+announcementPublish:
+  post:
+    tags:
+      - announcements
+    operationId: publishAnnouncement
+    summary: 发布公告，可定时
+    description: |
+      把公告推进到 `published` 或 `scheduled`。
+
+      **权限**：`announcement:publish`。
+
+      **时序**：`publish_at` 为空或已过去 → 立即 `published` 并发出
+      `announcement.published` SSE 事件；`publish_at` 为未来时刻 → `scheduled`，
+      到点由服务器自动发布（客户端无需轮询）。带 `broadcast=true` 时，发布/定时发布
+      触发广播任务，需要额外的 `channel:manage`。
+
+      **幂等**：对**已发布**公告重复调用返回 `200` 且状态不变；此时 `publish_at`
+      不可再修改（尝试修改返回 `409 conflict`）。`archived`/`expired` 公告不可发布，
+      返回 `409 conflict`。携带 `Idempotency-Key` 的网络重放返回首次响应，
+      不会重复广播。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: announcement_id
+        in: path
+        required: true
+        description: 公告 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/news.yaml#/components/schemas/PublishAnnouncementRequest
+          example:
+            publish_at: '2024-05-07T00:00:00.000Z'
+            broadcast: true
+            channel_ids:
+              - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+    responses:
+      '200':
+        description: 发布后的公告（状态为 `published` 或 `scheduled`）。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/Announcement
+            example:
+              id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              title: 2024 暑期集训安排
+              body_markdown: '## 时间：7 月 8 日起每周一、三、五 14:00 在 A301 训练。'
+              category: training
+              tags:
+                - 训练
+              priority: normal
+              pinned: false
+              status: scheduled
+              visibility: members
+              publish_at: '2024-05-07T00:00:00.000Z'
+              published_at: null
+              expires_at: null
+              archived_at: null
+              source:
+                kind: manual
+              dedup_key: null
+              broadcast_on_publish: true
+              broadcast_channel_ids:
+                - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              author: null
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              delivery_summary:
+                pending: 1
+                sent: 0
+                failed: 0
+              created_at: '2024-05-06T07:00:00.000Z'
+              updated_at: '2024-05-06T07:08:09.123Z'
+              revision: '2'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+announcementUnpublish:
+  post:
+    tags:
+      - announcements
+    operationId: unpublishAnnouncement
+    summary: 撤销发布，退回草稿
+    description: |
+      把 `published` 或 `scheduled` 的公告退回 `draft`：`published_at` 清空、
+      `publish_at` 清空，新闻板立即不再展示，并发出 `announcement.updated`
+      SSE 事件。已完成的广播投递不会被撤销。
+
+      **权限**：`announcement:publish`。
+
+      **幂等**：对 `draft` 公告重复调用返回 `200` 且状态不变；
+      `archived` 或 `expired` 公告返回 `409 conflict`（终态不可回到草稿，
+      归档公告如需移除请用 `DELETE ...?purge=true`）。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: announcement_id
+        in: path
+        required: true
+        description: 公告 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    responses:
+      '200':
+        description: 撤销发布后的公告，status 为 `draft`。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/Announcement
+            example:
+              id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              title: 2024 暑期集训安排
+              body_markdown: '## 时间：7 月 8 日起每周一、三、五 14:00 在 A301 训练。'
+              category: training
+              tags:
+                - 训练
+              priority: normal
+              pinned: false
+              status: draft
+              visibility: members
+              publish_at: null
+              published_at: null
+              expires_at: null
+              archived_at: null
+              source:
+                kind: manual
+              dedup_key: null
+              broadcast_on_publish: false
+              broadcast_channel_ids: []
+              author: null
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              delivery_summary:
+                pending: 0
+                sent: 1
+                failed: 0
+              created_at: '2024-05-06T07:00:00.000Z'
+              updated_at: '2024-05-06T08:00:00.000Z'
+              revision: '5'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+announcementPin:
+  post:
+    tags:
+      - announcements
+    operationId: setAnnouncementPin
+    summary: 设置或取消公告置顶
+    description: |
+      `pinned=true` 表示置顶，`false` 表示取消置顶。置顶公告在新闻板列表最前，
+      与排序键无关。
+
+      **权限**：`announcement:publish`。
+
+      **配额**：置顶总数上限由服务器配置 `announcements.max_pinned` 控制；
+      超过上限时返回 `409 conflict`（不会自动挤掉已有置顶）。取消置顶不受配额限制。
+
+      **幂等**：重复设置同一值是幂等的（返回 `200`，`revision` 仅在实际变化时提升）。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: announcement_id
+        in: path
+        required: true
+        description: 公告 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/news.yaml#/components/schemas/PinAnnouncementRequest
+          example:
+            pinned: true
+    responses:
+      '200':
+        description: 置顶状态更新后的公告。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/Announcement
+            example:
+              id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              title: 2024 暑期集训安排
+              body_markdown: '## 时间：7 月 8 日起每周一、三、五 14:00 在 A301 训练。'
+              category: training
+              tags:
+                - 训练
+              priority: high
+              pinned: true
+              status: published
+              visibility: members
+              publish_at: null
+              published_at: '2024-05-06T07:08:09.123Z'
+              expires_at: null
+              archived_at: null
+              source:
+                kind: manual
+              dedup_key: null
+              broadcast_on_publish: false
+              broadcast_channel_ids: []
+              author: null
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+              delivery_summary: null
+              created_at: '2024-05-06T07:00:00.000Z'
+              updated_at: '2024-05-06T08:30:00.000Z'
+              revision: '4'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+announcementBroadcast:
+  post:
+    tags:
+      - announcements
+    operationId: broadcastAnnouncement
+    summary: 广播公告到渠道，异步执行
+    description: |
+      把公告投递到指定广播渠道。**未发布的公告也允许广播**（用于提前通知），
+      广播不会改变公告的状态；`test=true` 时只投递到处于测试模式的渠道，
+      且不计入正式投递统计。
+
+      **权限**：`channel:manage`（广播会向外部渠道发送消息）。
+
+      **时序**：立即返回 `202 Accepted` 与 `Location: /jobs/{job_id}`
+      ，kind 为 `announcement_broadcast`；投递结果异步产生，逐条状态见
+      `GET /announcements/{announcement_id}/deliveries`，公告的 `delivery_summary`
+      随之更新。客户端应按 `Retry-After` 轮询任务或订阅 `announcements` 主题的
+      `delivery.failed` 事件。
+
+      **冲突**：同一公告已有正在运行的广播任务时返回 `409 conflict`
+      （避免重复轰炸渠道）；`Idempotency-Key` 的网络重放返回首次的 `202`，
+      不会重复创建任务。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: announcement_id
+        in: path
+        required: true
+        description: 公告 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/news.yaml#/components/schemas/BroadcastAnnouncementRequest
+          example:
+            channel_ids:
+              - chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            test: false
+    responses:
+      '202':
+        description: 广播任务已接受；按 `Location` 轮询任务状态。
+        headers:
+          Location:
+            $ref: ../components/headers/common.yaml#/components/headers/Location
+          Retry-After:
+            $ref: ../components/headers/common.yaml#/components/headers/RetryAfter
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/components/schemas/Job
+            example:
+              id: job_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              kind: announcement_broadcast
+              state: queued
+              progress:
+                percent: 0
+                message: 等待投递 2 个渠道
+              result: null
+              error: null
+              created_at: '2024-05-06T07:08:09.123Z'
+              started_at: null
+              finished_at: null
+              expires_at: null
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: qq-bot
+                display_name: QQ 机器人
+                kind: service
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT1M
+
+announcementDeliveries:
+  get:
+    tags:
+      - announcements
+    operationId: listAnnouncementDeliveries
+    summary: 列出公告的投递记录
+    description: |
+      列出该公告在各渠道上的投递记录（"公告 × 渠道"一条）。
+
+      **权限**：`announcement:read`。
+
+      **至少一次语义**：投递是 at-least-once——失败后按指数退避重试
+      （`attempts` 递增、`next_attempt_at` 给出下次时间，之后回到 `sending`），
+      因此**渠道侧可能收到重复消息**；公告默认模板中带有公告 id
+      （`{{id}}`），接收方可据此去重。`skipped` 表示渠道被禁用或
+      `visibility_filter` 不匹配，未尝试投递。
+
+      **过滤**：`state`、`channel_id`。渠道被删除后，记录中的 `channel`
+      是发起投递时的快照，仍可读。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: announcement_id
+        in: path
+        required: true
+        description: 公告 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: state
+        in: query
+        required: false
+        description: 按投递状态过滤。
+        schema:
+          $ref: ../components/schemas/news.yaml#/components/schemas/DeliveryState
+        example: failed
+      - name: channel_id
+        in: query
+        required: false
+        description: 只看某个渠道的投递记录。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Page
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Size
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Order
+    responses:
+      '200':
+        description: 投递记录分页结果。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/news.yaml#/components/schemas/PagedDelivery
+            example:
+              page: 1
+              size: 20
+              total: 1
+              has_next: false
+              items:
+                - id: dlv_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  announcement_id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  channel:
+                    id: chn_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    name: 2024 级训练群
+                    kind: qq_group
+                  state: failed
+                  attempts: 2
+                  last_attempt_at: '2024-05-06T07:09:00.000Z'
+                  sent_at: null
+                  error: 'HTTP 500 from upstream'
+                  external_message_id: null
+                  next_attempt_at: '2024-05-06T07:11:00.000Z'
+                  created_at: '2024-05-06T07:08:09.123Z'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT1M

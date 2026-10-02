@@ -1,0 +1,616 @@
+components:
+  schemas:
+    # ------------------------------------------------------------------ 标量
+    Id:
+      type: string
+      description: |
+        不透明资源标识符，形如 `<前缀>_<ULID>`，ULID 为 26 位 Crockford Base32。
+        前缀标明资源类型，已登记的取值如下。契约测试会强制示例只用这些前缀。
+
+        | 前缀 | 资源 |
+        | --- | --- |
+        | `acc_` | 主体/账号 `Principal`，同时也是 `member_id` |
+        | `cred_` | 凭证 `Credential` |
+        | `snp_` | 账号指标快照的落库记录 id，只出现在采集上报的逐条结果里 |
+        | `ojh_` | OJ 绑定 `OjHandle` |
+        | `sub_` | 提交记录 `OjSubmission` |
+        | `pbl_` | 题目 `OjProblem` |
+        | `rch_` | rating 记录 `OjRatingRecord` |
+                | `run_` | 采集器运行 `CrawlerRun` |
+        | `pxy_` | 代理服务器配置项 `ProxyServer` |
+        | `team_` | 队伍 `Team` |
+        | `sbd_` | 榜单 `Scoreboard` |
+        | `sbe_` | 榜单条目 `ScoreboardEntry` |
+        | `ann_` | 公告 `Announcement` |
+        | `chn_` | 广播渠道 `Channel` |
+        | `dlv_` | 投递记录 `Delivery` |
+        | `exp_` | 成员名单导出 `RosterExport` |
+        | `quota_` | 名额池 `Quota` |
+        | `claim_` | 名额认领 `QuotaClaim` |
+        | `job_` | 异步任务 `Job` |
+        | `aud_` | 审计记录 `AuditLog` |
+        | `req_` | 请求排障标识。它不是资源 id，只出现在 `X-Request-Id` 与 `Problem.request_id` |
+
+        **成员没有独立前缀**。`member_id` 就是 `acc_` 主体 id，不存在 `mem_`
+        前缀；`Member` 是主体的成员视图，不是第二种身份。见 `README.md` §3 术语。
+
+        凭证明文使用另一组前缀，不是资源 id：`xcp_` 是 API Key，`xcr_` 是刷新令牌，
+        `xcv_` 是 OJ 归属校验 token，`st_` 是短时流令牌。
+
+        **客户端必须把 id 视为不透明字符串**，不得解析或构造其内部结构。
+      pattern: '^[a-z][a-z0-9]{1,7}_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples:
+        - acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+
+    Timestamp:
+      type: string
+      format: date-time
+      description: |
+        UTC 时刻，RFC 3339，必须带 `Z` 后缀，毫秒精度可选。
+        服务端不接受本地时间或其它时区偏移；带偏移的输入一律 `422 validation_failed`。
+      pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$'
+      examples:
+        - '2024-05-06T07:08:09.123Z'
+
+    Date:
+      type: string
+      format: date
+      description: UTC 日历日（`YYYY-MM-DD`）。热力图与按天聚合使用。
+      examples:
+        - '2024-05-06'
+
+    Duration:
+      type: string
+      description: |
+        ISO-8601 时长，写法形如 `PT15M` 是 15 分钟、`PT1H` 是 1 小时、
+        `P365D` 是 365 天、`P1Y` 是 1 年。它表示"持续多久"而不是"哪段时间"，
+        因此不要用它表达"某月到某月"这类日期区间。
+      pattern: '^P(?!$)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+(\.\d+)?S)?)?$'
+      examples:
+        - PT15M
+
+    SortOrder:
+      type: string
+      enum:
+        - asc
+        - desc
+      description: 排序方向。
+      examples:
+        - desc
+
+    Judge:
+      type: string
+      description: |
+        外部评测平台标识。`other` 表示未在枚举内的小众平台，此时相关资源必须
+        在 `judge_label` 字段里给出人类可读名称。
+      enum:
+        - codeforces
+        - atcoder
+        - luogu
+        - nowcoder
+        - vjudge
+        - qoj
+        - other
+      examples:
+        - codeforces
+
+    Visibility:
+      type: string
+      description: |
+        资源可见性。`public`：匿名可读；`members`：任何已认证主体可读；
+        `private`：仅创建者、被授予 `*:manage` 的主体与平台管理员可读。
+      enum:
+        - public
+        - members
+        - private
+      default: members
+      examples:
+        - members
+
+    PrincipalKind:
+      type: string
+      description: |
+        `human` 为自然人账号，`service` 为机器人/采集器/Agent 等非人类主体。
+        两者使用同一套凭证与 scope 机制，仅此字段与标签不同。
+      enum:
+        - human
+        - service
+      examples:
+        - human
+
+    # ------------------------------------------------------------- 通用信封
+    PageMeta:
+      type: object
+      description: 偏移分页的元信息，被各列表响应以 `allOf` 组合。
+      required:
+        - page
+        - size
+        - total
+        - has_next
+      properties:
+        page:
+          type: integer
+          minimum: 1
+          description: 当前页码，从 1 开始。
+        size:
+          type: integer
+          minimum: 1
+          description: 每页条数。
+        total:
+          type: integer
+          minimum: 0
+          description: 满足过滤条件的条目总数（与 `page` 无关）。
+        has_next:
+          type: boolean
+          description: 是否存在下一页；等价于 `page * size < total`。
+      examples:
+        - page: 1
+          size: 20
+          total: 137
+          has_next: true
+
+    CursorPageMeta:
+      type: object
+      description: |
+        游标分页元信息，用于高流量只读集合（提交记录、审计日志、变更流）。
+        游标不透明，且**只在按 `(排序键, id)` 稳定排序时有意义**：
+        服务端保证同一游标在数据增长期间不会跳过或重复已返回的条目。
+      required:
+        - has_more
+        - next_cursor
+      properties:
+        has_more:
+          type: boolean
+          description: 是否还有下一页。
+        next_cursor:
+          type:
+            - string
+            - 'null'
+          description: |
+            下一页游标；`has_more` 为 `false` 时为 `null`。
+            游标与签发时的排序键和过滤条件绑定，客户端应原样回传，不要解析或长期缓存。
+            超出服务器数据保留期后请求返回 `410 cursor_expired`，此时需要重新从第一页取；
+            变更流则要重新基线化，保留期的默认值见 `README.md` §4.10 与 `Config`。
+      examples:
+        - has_more: true
+          next_cursor: eyJ0IjoiMjAyNC0wNS0wNlQwNzowODowOS4xMjNaIiwiaWQiOiJzdWJfMDFKOFo1VjZRMEszTTdOOVAyUjRUNlc4WDAifQ
+
+    Problem:
+      type: object
+      description: |
+        RFC 7807 问题详情（`application/problem+json`）。所有 4xx/5xx 响应都是此格式。
+      required:
+        - type
+        - title
+        - status
+        - code
+      properties:
+        type:
+          type: string
+          format: uri
+          description: 问题类型的稳定 URI，形如 `https://docs.dmu-xcpc.example/errors/<code>`。
+        title:
+          type: string
+          description: 面向人的简短描述（英文，稳定）。
+        status:
+          type: integer
+          minimum: 100
+          maximum: 599
+          description: HTTP 状态码，与响应行一致。
+        detail:
+          type: string
+          description: 针对本次请求的具体说明，可含上下文，不保证稳定。
+        instance:
+          type: string
+          description: 本次请求的 URI，含查询串。
+        code:
+          $ref: '#/components/schemas/ProblemCode'
+        request_id:
+          type: string
+          description: 与响应头 `X-Request-Id` 相同的排障标识。
+        errors:
+          type: array
+          description: 字段级校验错误；`validation_failed` 时至少一项。
+          items:
+            $ref: '#/components/schemas/ValidationError'
+        retry_after_seconds:
+          type: integer
+          minimum: 0
+          description: 与响应头 `Retry-After` 一致的秒数。
+        docs_url:
+          type: string
+          format: uri
+          description: 该问题的人类文档地址。
+      examples:
+        - type: https://docs.dmu-xcpc.example/errors/insufficient_scope
+          title: Insufficient scope
+          status: 403
+          code: insufficient_scope
+          detail: 凭证缺少 member:manage 权限
+          instance: /api/v1/members/acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          request_id: req_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          docs_url: https://docs.dmu-xcpc.example/errors/insufficient_scope
+
+    ProblemCode:
+      type: string
+      description: |
+        机器可读的错误码，客户端据此分支处理；新增取值属于**非破坏性**变更，
+        但客户端应对未知值回退到按 HTTP 状态码处理。
+
+        `method_not_allowed` 表示对已存在的路径使用了未定义的 HTTP 方法，返回 `405`。
+
+        同为 `422` 的两个码含义不同：`validation_failed` 表示**字段级**校验失败，
+        `errors` 数组会指出每个出错字段与原因；`unprocessable_entity` 表示请求字段本身
+        合法，但**业务规则**不允许，例如队伍人数超过上限，此时没有字段级错误。
+      enum:
+        - bad_request
+        - validation_failed
+        - unauthenticated
+        - invalid_token
+        - token_expired
+        - insufficient_scope
+        - forbidden
+        - not_found
+        - method_not_allowed
+        - conflict
+        - idempotency_key_reused
+        - version_conflict
+        - precondition_failed
+        - quota_exceeded
+        - team_claim_limit_reached
+        - claim_window_closed
+        - quota_not_open
+        - quota_finalized
+        - handle_already_linked
+        - judge_not_supported
+        - dedup_conflict
+        - cursor_expired
+        - rate_limited
+        - payload_too_large
+        - unsupported_media_type
+        - unprocessable_entity
+        - crawler_not_embedded
+        - crawler_run_in_progress
+        - job_not_cancellable
+        - export_expired
+        - internal_error
+        - service_unavailable
+      examples:
+        - insufficient_scope
+
+    ValidationError:
+      type: object
+      description: 单个字段的校验失败说明。
+      required:
+        - pointer
+        - message
+      properties:
+        pointer:
+          type: string
+          description: |
+            指向请求体中出错位置的 JSON Pointer（RFC 6901），
+            例如 `/items/3/handle`；查询参数错误时使用 `/query/handle`。
+        message:
+          type: string
+          description: 面向人的说明。
+        code:
+          type: string
+          description: 稳定的校验错误子码，例如 `pattern`、`required`、`out_of_range`。
+      examples:
+        - pointer: /items/3/handle
+          message: handle 只允许字母、数字与 ._-，长度 1..64
+          code: pattern
+
+    # ------------------------------------------------------------- 轻量引用
+    PrincipalRef:
+      type: object
+      description: 主体的轻量引用，避免在列表里内联完整档案。
+      required:
+        - id
+        - username
+        - display_name
+        - kind
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        username:
+          type: string
+          description: 人类主体是登录名，service 主体是标识名。
+        display_name:
+          type: string
+          description: 展示名，可含中文。
+        kind:
+          $ref: '#/components/schemas/PrincipalKind'
+      examples:
+        - id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          username: alice
+          display_name: 张三
+          kind: human
+
+    TeamRef:
+      type: object
+      description: 队伍的轻量引用。
+      required:
+        - id
+        - name
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        name:
+          type: string
+          description: 队伍名，同一赛季内唯一。
+      examples:
+        - id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          name: DMU-1
+
+    # ------------------------------------------------------------- 异步任务
+    JobKind:
+      type: string
+      description: |
+        异步任务的类型，决定 `result` 的形状。每一种都对应一个会返回 `202` 的端点：
+        `roster_export` 来自 `POST /roster/exports`，`scoreboard_rebuild` 来自
+        `POST /scoreboards/{id}/rebuild`，`crawler_run` 来自 `POST /crawler/trigger`，
+        `announcement_broadcast` 来自 `POST /announcements/{id}/broadcast`。
+        渠道连通性测试是同步请求，不产生任务，因此不在这里。
+      enum:
+        - roster_export
+        - scoreboard_rebuild
+        - crawler_run
+        - announcement_broadcast
+      examples:
+        - roster_export
+
+    JobState:
+      type: string
+      description: |
+        任务状态机：`queued → running → (succeeded | failed | cancelled)`；
+        `expired` 表示成功产物已过保留期而被清理，仅 `result` 不可再取。
+      enum:
+        - queued
+        - running
+        - succeeded
+        - failed
+        - cancelled
+        - expired
+      examples:
+        - succeeded
+
+    JobProgress:
+      type: object
+      description: 粗粒度进度；不保证单调递增的精确性，仅用于展示。
+      required:
+        - percent
+      properties:
+        percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: 完成百分比；未知时为 0。
+        message:
+          type: string
+          description: 当前阶段的简短说明。
+      examples:
+        - percent: 42
+          message: 正在抓取第 3/8 页
+
+    Job:
+      type: object
+      description: |
+        异步任务资源。长耗时操作返回 `202 Accepted` 与 `Location: /jobs/{job_id}`，
+        客户端按 `Retry-After` 轮询；终态后 `result` 才可用。
+      required:
+        - id
+        - kind
+        - state
+        - progress
+        - created_at
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        kind:
+          $ref: '#/components/schemas/JobKind'
+        state:
+          $ref: '#/components/schemas/JobState'
+        progress:
+          $ref: '#/components/schemas/JobProgress'
+        result:
+          type:
+            - object
+            - 'null'
+          additionalProperties: true
+          description: |
+            成功时的产物描述。`kind` 决定具体字段；未知字段必须被忽略。
+            `roster_export` 时为 `RosterExport`，`scoreboard_rebuild` 时为
+            `{ "scoreboard_id": Id, "entry_count": integer }`。
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/Problem'
+            - type: 'null'
+          description: 失败时的原因（问题详情）。
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        started_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        finished_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        expires_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 任务记录与产物的保留截止时间；之后转为 `expired`。
+        created_by:
+          oneOf:
+            - $ref: '#/components/schemas/PrincipalRef'
+            - type: 'null'
+      examples:
+        - id: job_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          kind: roster_export
+          state: succeeded
+          progress:
+            percent: 100
+          result:
+            export_id: exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            row_count: 87
+          error: null
+          created_at: '2024-05-06T07:08:09.123Z'
+          started_at: '2024-05-06T07:08:09.500Z'
+          finished_at: '2024-05-06T07:08:11.000Z'
+          expires_at: '2024-05-07T07:08:09.123Z'
+
+    # ----------------------------------------------------------- 增量变更流
+    ChangeOp:
+      type: string
+      description: 变更类型；`delete` 表示该 id 在服务端已不存在，客户端应删除本地副本。
+      enum:
+        - upsert
+        - delete
+      examples:
+        - upsert
+
+    ResourceChange:
+      type: object
+      description: 单条增量变更。只给元信息，正文由客户端按需回源。
+      required:
+        - resource
+        - id
+        - op
+        - revision
+        - updated_at
+      properties:
+        resource:
+          type: string
+          description: |
+            资源集合名（`members`、`teams`、`oj-handles`、`scoreboards`、
+            `announcements`、`quotas`、`channels`、`config`）。
+        id:
+          $ref: '#/components/schemas/Id'
+        op:
+          $ref: '#/components/schemas/ChangeOp'
+        revision:
+          type: string
+          description: 该资源当前的版本标记，等价于其 `ETag` 值。
+        updated_at:
+          $ref: '#/components/schemas/Timestamp'
+      examples:
+        - resource: members
+          id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          op: upsert
+          revision: '17'
+          updated_at: '2024-05-06T07:08:09.123Z'
+
+    # ------------------------------------------------------------- 服务器元信息
+    Capabilities:
+      type: object
+      description: 服务器能力开关。客户端据此裁剪 UI，例如是否显示"立即抓取"按钮。
+      required:
+        - crawler_embedded
+        - public_read
+        - sse
+        - judges
+        - ingest_batch_max
+        - idempotency_window
+        - max_stream_connections
+      properties:
+        crawler_embedded:
+          type: boolean
+          description: 服务端是否代管采集器；仅此时 `POST /crawler/trigger` 可用。
+        public_read:
+          type: boolean
+          description: 匿名主体是否可读 `public` 可见性资源。
+        sse:
+          type: boolean
+          description: 是否提供 SSE 事件流。
+        judges:
+          type: array
+          description: 服务器已启用采集的平台。
+          items:
+            $ref: '#/components/schemas/Judge'
+        ingest_batch_max:
+          type: integer
+          minimum: 1
+          description: 单个 ingest 批次允许的最大条目数，超出返回 `413 payload_too_large`。
+        idempotency_window:
+          $ref: '#/components/schemas/Duration'
+          description: |
+            `Idempotency-Key` 的去重窗口，默认 `PT24H`。**超出窗口后用同一个键重放会被当成
+            新请求**（离线队列保留太久就会重复副作用），因此客户端应在重放前检查条目年龄。
+          examples:
+            - PT24H
+        max_stream_connections:
+          type: integer
+          minimum: 1
+          description: 同一主体允许的 SSE 并发连接数上限，超出返回 `429`。
+          examples:
+            - 5
+      examples:
+        - crawler_embedded: true
+          public_read: true
+          sse: true
+          judges:
+            - codeforces
+            - atcoder
+            - luogu
+          ingest_batch_max: 500
+          idempotency_window: PT24H
+          max_stream_connections: 5
+
+    Meta:
+      type: object
+      description: 服务器元信息，供客户端做能力探测与版本对齐。
+      required:
+        - api_version
+        - server_version
+        - server_time
+        - current_season
+        - capabilities
+      properties:
+        idempotency_window:
+          $ref: '#/components/schemas/Duration'
+          description: |
+            `Idempotency-Key` 的去重窗口，默认 `PT24H`。**超出窗口后用同一个键重放会被当成新请求**
+            （客户端离线队列保留太久就会重复副作用），因此客户端应在重放前检查条目年龄。
+          examples:
+            - PT24H
+        max_stream_connections:
+          type: integer
+          minimum: 1
+          description: 同一主体允许的 SSE 并发连接数上限，超出返回 `429`。
+          examples:
+            - 5
+        api_version:
+          type: string
+          description: 契约版本，如 `1.0.0`。
+        server_version:
+          type: string
+          description: 服务端实现版本（构建号），排障用。
+        server_time:
+          $ref: '#/components/schemas/Timestamp'
+        current_season:
+          type: string
+          pattern: '^[0-9]{4}-[0-9]{4}$'
+          description: |
+            当前赛季（`2024-2025`，9 月 1 日到次年 8 月 31 日），等于
+            `Config.roster.current_season`。创建队伍或名额池时省略 `season` 就会落到它；
+            客户端也可以据此把界面切到"本赛季"。
+          examples:
+            - '2024-2025'
+        capabilities:
+          $ref: '#/components/schemas/Capabilities'
+      examples:
+        - api_version: 1.0.0
+          server_version: 1.4.2+9f1c2ab
+          server_time: '2024-05-06T07:08:09.123Z'
+          current_season: '2024-2025'
+          capabilities:
+            crawler_embedded: true
+            public_read: true
+            sse: true
+            judges:
+              - codeforces
+            ingest_batch_max: 500
+            idempotency_window: PT24H
+            max_stream_connections: 5

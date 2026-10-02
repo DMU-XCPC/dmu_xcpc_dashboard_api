@@ -1,0 +1,145 @@
+auditLogs:
+  get:
+    tags:
+      - audit
+    operationId: listAuditLogs
+    summary: 查询审计日志
+    description: |
+      需要 `audit:read`。按时间倒序返回审计记录，支持按操作者、动作、
+      目标资源与结果过滤。游标分页（`cursor`/`limit`）保证在持续写入期间
+      不跳过、不重复。
+
+      **写入时序**：审计写入是**同步**的——业务响应返回时该记录已落库，
+      所以紧接着查询本接口一定能读到它（`x-consistency: strong`）。
+      被拒绝的请求（`outcome: denied`）与失败的请求（`outcome: failure`）同样入账。
+
+      **脱敏**：`metadata` 在写入前已脱敏，口令、令牌、webhook secret 与
+      完整请求体不落库；`ip` 按隐私策略截断。
+
+      **权限**：只有持有 `audit:read` 的主体可读；普通成员读取返回
+      `403 insufficient_scope`。查询本身也会被审计（`action: audit.read`）。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Cursor
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Limit
+      - name: actor_id
+        in: query
+        required: false
+        description: 只返回该主体发起的操作。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: actor_kind
+        in: query
+        required: false
+        description: 只返回指定类别的操作者（`system` 记录没有 `actor`）。
+        schema:
+          $ref: ../components/schemas/ops.yaml#/components/schemas/ActorKind
+        example: human
+      - name: action
+        in: query
+        required: false
+        description: 只返回该动作（形如 `announcement.publish`）；支持 `前缀.*` 通配写法。
+        schema:
+          type: string
+          maxLength: 128
+        example: announcement.publish
+      - name: resource
+        in: query
+        required: false
+        description: 只返回目标资源集合（`target.resource`）为该值的记录。
+        schema:
+          type: string
+          maxLength: 64
+        example: announcements
+      - name: resource_id
+        in: query
+        required: false
+        description: 只返回目标资源 id 为该值的记录。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: outcome
+        in: query
+        required: false
+        description: 只返回指定结果。
+        schema:
+          $ref: ../components/schemas/ops.yaml#/components/schemas/AuditOutcome
+        example: success
+      - name: request_id
+        in: query
+        required: false
+        description: 按请求标识精确定位一条（或一族）记录，用于排障。
+        schema:
+          type: string
+          maxLength: 128
+        example: req_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: 'from'
+        in: query
+        required: false
+        description: 起始时刻，含，按 `at` 过滤。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-05-01T00:00:00.000Z'
+      - name: 'to'
+        in: query
+        required: false
+        description: 结束时刻，含，按 `at` 过滤；必须不早于 `from`，否则 `422 validation_failed`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-05-06T23:59:59.000Z'
+    responses:
+      '200':
+        description: 审计日志的游标分页结果，按 `at` 降序。
+        headers:
+          X-RateLimit-Limit:
+            $ref: ../components/headers/common.yaml#/components/headers/RateLimitLimit
+          X-RateLimit-Remaining:
+            $ref: ../components/headers/common.yaml#/components/headers/RateLimitRemaining
+          X-RateLimit-Reset:
+            $ref: ../components/headers/common.yaml#/components/headers/RateLimitReset
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/ops.yaml#/components/schemas/PagedAuditLog
+            example:
+              has_more: false
+              next_cursor: null
+              items:
+                - id: aud_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  at: '2024-05-06T07:08:09.123Z'
+                  actor:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+                  actor_kind: human
+                  action: announcement.publish
+                  target:
+                    resource: announcements
+                    id: ann_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    label: 2024 暑期集训安排
+                  outcome: success
+                  status_code: 200
+                  scope_used: announcement:publish
+                  ip: 2001:db8::1
+                  user_agent: Mozilla/5.0
+                  request_id: req_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  metadata:
+                    channel_count: 2
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong

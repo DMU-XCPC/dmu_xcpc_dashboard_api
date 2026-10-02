@@ -1,0 +1,2394 @@
+components:
+  schemas:
+    # ================================================================ OJ 绑定
+    OjHandle:
+      type: object
+      description: |
+        成员与某个 OJ 平台的 ID 绑定。`handle` 是外部平台的**原始账号名**，
+        按普通字符串逐字保存（大小写敏感），不受内部 `Id` 模式约束。
+        `revision` 用于乐观并发控制，值与 `ETag` 一致。
+
+        `verification_token` 是归属校验用的秘密：**只有绑定所属主体本人，或持有
+        `oj:manage` 的主体能看到明文，其它调用方一律看到 `null`**。
+
+        `summary` 是采集结果的最终一致视图，见 `x-freshness-bound`，
+        尚未采集到任何数据时为 `null`。
+
+        `updated_at` 是该绑定的最近变更时刻，与 `revision` 递增同源：
+        绑定创建/解绑、归属校验状态变化（`verify`）、采集补全字段与 `summary` 刷新
+        都会推进它。`GET /oj-handles` 的 `updated_since` 增量同步以本字段为准。
+      required:
+        - id
+        - principal_id
+        - judge
+        - handle
+        - verified
+        - verification_state
+        - linked_at
+        - revision
+        - updated_at
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        principal_id:
+          $ref: './common.yaml#/components/schemas/Id'
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        judge_label:
+          type: [string, 'null']
+          description: |
+            `judge: other` 时必填的人类可读平台名，例如 `DMOJ`；其余情况为 `null`。
+          maxLength: 64
+          examples:
+            - DMOJ
+        handle:
+          type: string
+          description: 外部平台的原始账号名，逐字保存、大小写敏感。
+          minLength: 1
+          maxLength: 64
+          examples:
+            - tourist
+        profile_url:
+          type: [string, 'null']
+          description: 该账号在外部平台的个人主页 URL；未知时为 `null`。
+          examples:
+            - https://codeforces.com/profile/tourist
+        verified:
+          type: boolean
+          description: 归属校验是否通过；等价于 `verification_state == verified`。
+        verification_state:
+          type: string
+          description: |
+            归属校验状态机：`pending`（已发起，等待抓取到校验用提交或签名）
+            → `verified`（校验通过，此后该绑定的采集数据计入成员统计）
+            或 `failed`（超过有效期或校验串不匹配，可重新发起校验）。
+            `failed` 可回到 `pending`；`verified` 一旦达成不会自动回退。
+          enum:
+            - pending
+            - verified
+            - failed
+          examples:
+            - verified
+        verification_token:
+          type: [string, 'null']
+          description: |
+            归属校验令牌（需写进 OJ 的签名/提交内容）。**仅本人或 `oj:manage` 可见**，
+            其它调用方看到 `null`。`verified` 后服务端可保留或清空，客户端不得依赖其长期存在。
+          examples:
+            - xcv_7f3aQ0K3M7N9P2R4T6W8X0
+        verified_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 校验通过的时刻；未通过时为 `null`。
+        linked_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        last_crawled_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 最近一次成功采集到该账号数据的时刻；从未采集为 `null`。
+        last_submission_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 已知最新一条提交的 `submitted_at`；无提交或未采集为 `null`。
+        summary:
+          oneOf:
+            - $ref: '#/components/schemas/OjHandleSummary'
+            - type: 'null'
+          description: 该绑定的聚合统计摘要；尚未物化时为 `null`。
+        revision:
+          type: string
+          description: 版本标记，与 `ETag` 值一致；写入时可用 `If-Match` 做乐观并发控制。
+          examples:
+            - '17'
+        updated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+          description: |
+            该绑定的最近变更时刻，含 verify、重新抓取、`summary` 刷新，
+            与 `revision` 递增同源；`GET /oj-handles` 的 `updated_since` 以它为准。
+      examples:
+        - id: ojh_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          judge: codeforces
+          judge_label: null
+          handle: tourist
+          profile_url: https://codeforces.com/profile/tourist
+          verified: true
+          verification_state: verified
+          verification_token: null
+          verified_at: '2024-04-01T02:00:00.000Z'
+          linked_at: '2024-03-20T08:00:00.000Z'
+          last_crawled_at: '2024-05-06T07:00:00.000Z'
+          last_submission_at: '2024-05-06T06:59:12.000Z'
+          summary:
+            rating: 3721
+            max_rating: 3800
+            rating_delta_30d: 42
+            solved_count: 1873
+            attempted_count: 2104
+            submissions_30d: 96
+            active_days_30d: 21
+            computed_at: '2024-05-06T07:00:05.000Z'
+          revision: '17'
+          updated_at: '2024-05-06T07:00:05.000Z'
+
+    OjHandleRef:
+      type: object
+      description: |
+        OJ 绑定的轻量引用，用于在提交、rating 等记录里内联身份而不展开完整绑定。
+      required:
+        - id
+        - judge
+        - handle
+        - verified
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        judge_label:
+          type: [string, 'null']
+          description: "`judge: other` 时的人类可读平台名；其余为 `null`。"
+          examples:
+            - DMOJ
+        handle:
+          type: string
+          description: 外部平台的原始账号名。
+          minLength: 1
+          maxLength: 64
+          examples:
+            - tourist
+        verified:
+          type: boolean
+          description: 该绑定是否已通过归属校验。
+        latest_rating:
+          type: [integer, 'null']
+          description: 最近一次已知 rating；未知为 `null`。
+          examples:
+            - 3721
+      examples:
+        - id: ojh_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          judge: codeforces
+          judge_label: null
+          handle: tourist
+          verified: true
+          latest_rating: 3721
+
+    OjHandleSummary:
+      type: object
+      description: |
+        单个 OJ 绑定的聚合统计（由采集/物化任务计算，最终一致视图）。
+        计数均以该绑定在服务器侧已采集的数据为准；`computed_at` 是聚合完成时刻，
+        早于该时刻写入的原始记录可能尚未计入。
+      required:
+        - solved_count
+        - attempted_count
+        - computed_at
+      properties:
+        rating:
+          type: [integer, 'null']
+          description: 当前 rating（平台无 rating 体系时为 `null`）。
+          examples:
+            - 3721
+        max_rating:
+          type: [integer, 'null']
+          description: 历史最高 rating。
+          examples:
+            - 3800
+        rating_delta_30d:
+          type: [integer, 'null']
+          description: 最近 30 天 rating 净变化；数据不足时为 `null`。
+          examples:
+            - 42
+        solved_count:
+          type: integer
+          minimum: 0
+          description: 已解出的不同题目数（`accepted` 去重）。
+          examples:
+            - 1873
+        attempted_count:
+          type: integer
+          minimum: 0
+          description: 有提交记录的不同题目数，含未解出。
+          examples:
+            - 2104
+        submissions_30d:
+          type: integer
+          minimum: 0
+          description: 最近 30 天的提交条数。
+          examples:
+            - 96
+        active_days_30d:
+          type: integer
+          minimum: 0
+          description: 最近 30 天中有提交记录的天数。
+          examples:
+            - 21
+        computed_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+      examples:
+        - rating: 3721
+          max_rating: 3800
+          rating_delta_30d: 42
+          solved_count: 1873
+          attempted_count: 2104
+          submissions_30d: 96
+          active_days_30d: 21
+          computed_at: '2024-05-06T07:00:05.000Z'
+
+    # ================================================================== 题目
+    OjProblemRef:
+      type: object
+      description: |
+        题目的轻量引用。`external_id` 是**外部平台的原始题目编号**
+        ，例如 Codeforces 的 `1873A`、洛谷的 `P1001`，普通字符串，不是内部 `Id`。
+        自然键为 `(judge, external_id)`。
+      required:
+        - judge
+        - external_id
+      properties:
+        problem_id:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Id'
+            - type: 'null'
+          description: 服务器侧题目资源的内部 id；题目尚未入库时为 `null`。
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        external_id:
+          type: string
+          description: 外部平台的原始题目编号，逐字保存、大小写敏感。
+          minLength: 1
+          maxLength: 128
+          examples:
+            - 1873A
+        title:
+          type: [string, 'null']
+          description: 题目标题；采集器未提供时为 `null`。
+          examples:
+            - Short Sort
+        url:
+          type: [string, 'null']
+          description: 题目在外部平台的 URL。
+          examples:
+            - https://codeforces.com/contest/1873/problem/A
+        tags:
+          type: array
+          description: 平台标签或算法标签；未知时为空数组。
+          items:
+            type: string
+          examples:
+            - - brute force
+              - implementation
+        difficulty:
+          type: [integer, 'null']
+          description: 平台自身的难度分值（语义随平台而定）；未知为 `null`。
+          examples:
+            - 800
+        rating:
+          type: [integer, 'null']
+          description: 平台自身的难度 rating，例如 Codeforces rating；未知为 `null`。
+          examples:
+            - 800
+      examples:
+        - problem_id: pbl_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          judge: codeforces
+          external_id: 1873A
+          title: Short Sort
+          url: https://codeforces.com/contest/1873/problem/A
+          tags:
+            - brute force
+            - implementation
+          difficulty: 800
+          rating: 800
+
+    OjProblem:
+      type: object
+      description: |
+        服务器侧保存的题目资源。`(judge, external_id)` 为自然键：同一自然键的重复
+        ingest 不会新建资源，只会补全缺失字段。
+        `first_seen_at` 是该题目首次被采集到的时刻，`updated_at` 是最后一次字段变更时刻，
+        可用于 `updated_since` 增量同步。
+      required:
+        - id
+        - judge
+        - external_id
+        - title
+        - tags
+        - first_seen_at
+        - updated_at
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        external_id:
+          type: string
+          description: 外部平台的原始题目编号，逐字保存。
+          minLength: 1
+          maxLength: 128
+          examples:
+            - 1873A
+        title:
+          type: string
+          description: 题目标题。
+          minLength: 1
+          maxLength: 300
+          examples:
+            - Short Sort
+        url:
+          type: [string, 'null']
+          description: 题目在外部平台的 URL。
+          examples:
+            - https://codeforces.com/contest/1873/problem/A
+        tags:
+          type: array
+          description: 平台标签或算法标签。
+          items:
+            type: string
+          examples:
+            - - implementation
+        difficulty:
+          type: [integer, 'null']
+          description: 平台自身的难度分值；未知为 `null`。
+          examples:
+            - 800
+        rating:
+          type: [integer, 'null']
+          description: 平台自身的难度 rating；未知为 `null`。
+          examples:
+            - 800
+        solved_count:
+          type: [integer, 'null']
+          description: 服务器已知的、解出该题的不同绑定数；尚未物化时为 `null`。
+          examples:
+            - 12
+        attempt_count:
+          type: [integer, 'null']
+          description: 服务器已知的、提交过该题的不同绑定数；尚未物化时为 `null`。
+          examples:
+            - 19
+        first_seen_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        updated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+      examples:
+        - id: pbl_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          judge: codeforces
+          external_id: 1873A
+          title: Short Sort
+          url: https://codeforces.com/contest/1873/problem/A
+          tags:
+            - implementation
+          difficulty: 800
+          rating: 800
+          solved_count: 12
+          attempt_count: 19
+          first_seen_at: '2024-04-01T02:00:00.000Z'
+          updated_at: '2024-05-06T07:00:00.000Z'
+
+    # ================================================================== 比赛
+    OjContestRef:
+      type: object
+      description: |
+        比赛（contest / 评测场次）的轻量引用。`contest_id` 是**外部平台的原始比赛编号**，
+        普通字符串。自然键为 `(judge, contest_id)`。
+      required:
+        - judge
+        - contest_id
+      properties:
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        contest_id:
+          type: string
+          description: 外部平台的原始比赛编号，逐字保存。
+          minLength: 1
+          maxLength: 128
+          examples:
+            - '1873'
+        name:
+          type: [string, 'null']
+          description: 比赛名称；未知为 `null`。
+          examples:
+            - Codeforces Round 898 (Div. 4)
+        url:
+          type: [string, 'null']
+          description: 比赛页面 URL。
+          examples:
+            - https://codeforces.com/contest/1873
+        started_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 比赛开始时刻；未知为 `null`。
+      examples:
+        - judge: codeforces
+          contest_id: '1873'
+          name: Codeforces Round 898 (Div. 4)
+          url: https://codeforces.com/contest/1873
+          started_at: '2023-09-21T14:35:00.000Z'
+
+    # ================================================================== 提交
+    OjVerdict:
+      type: string
+      description: |
+        归一化后的评测结果。各平台原始结果先映射到本枚举，无法归类的放入 `other`
+        并在 `OjSubmission.verdict_raw` 里保留原文。`skipped` 表示被跳过，例如题目被移除。
+      enum:
+        - accepted
+        - wrong_answer
+        - time_limit_exceeded
+        - memory_limit_exceeded
+        - runtime_error
+        - compile_error
+        - presentation_error
+        - partial
+        - skipped
+        - other
+      examples:
+        - accepted
+
+    OjSubmission:
+      type: object
+      description: |
+        一条 OJ 提交记录。自然键为 `(judge, submission_id)`，其中 `submission_id` 是
+        **外部平台的原始提交编号**（普通字符串）。`ingested_at` 是服务器写入时刻，
+        `submitted_at` 是平台上的提交时刻；补抓历史数据时前者可能远晚于后者。
+        本结构只包含公开的 OJ 数据，不含手机号/学号等 PII。
+      required:
+        - id
+        - judge
+        - submission_id
+        - handle
+        - problem
+        - submitted_at
+        - ingested_at
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        submission_id:
+          type: string
+          description: 外部平台的原始提交编号，逐字保存，可能是数字或字符串形式。
+          minLength: 1
+          maxLength: 128
+          examples:
+            - '223456789'
+        handle:
+          type: string
+          description: 提交者的 OJ 账号名（外部平台原始值）。
+          minLength: 1
+          maxLength: 64
+          examples:
+            - tourist
+        principal_id:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Id'
+            - type: 'null'
+          description: |
+            若该 `handle` 已与某个主体绑定，则为其 id；未绑定或绑定未通过校验时为 `null`。
+        problem:
+          $ref: '#/components/schemas/OjProblemRef'
+        verdict:
+          oneOf:
+            - $ref: '#/components/schemas/OjVerdict'
+            - type: 'null'
+          description: 归一化评测结果，取值见 `OjVerdict`；平台尚未给出结果时为 `null`。
+        verdict_raw:
+          type: [string, 'null']
+          description: 平台原始评测结果文本，便于排障与后续重新归一化。
+          examples:
+            - OK
+        language:
+          type: [string, 'null']
+          description: 提交语言（平台原始写法，如 `GNU C++17`）。
+          examples:
+            - GNU C++17
+        submitted_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        ingested_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        contest:
+          oneOf:
+            - $ref: '#/components/schemas/OjContestRef'
+            - type: 'null'
+          description: 所属比赛；练习提交（不在比赛中）为 `null`。
+        is_first_ac:
+          type: boolean
+          description: |
+            是否是该 `(judge, handle, problem)` 的首次 `accepted`。
+            由服务器按自然键判定，采集器上报的同名字段仅作提示。
+      examples:
+        - id: sub_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          judge: codeforces
+          submission_id: '223456789'
+          handle: tourist
+          principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          problem:
+            problem_id: pbl_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+            judge: codeforces
+            external_id: 1873A
+            title: Short Sort
+            url: https://codeforces.com/contest/1873/problem/A
+            tags:
+              - implementation
+            difficulty: 800
+            rating: 800
+          verdict: accepted
+          verdict_raw: OK
+          language: GNU C++17
+          submitted_at: '2024-05-06T06:59:12.000Z'
+          ingested_at: '2024-05-06T07:01:00.000Z'
+          contest:
+            judge: codeforces
+            contest_id: '1873'
+            name: Codeforces Round 898 (Div. 4)
+            url: https://codeforces.com/contest/1873
+            started_at: '2023-09-21T14:35:00.000Z'
+          is_first_ac: true
+
+    # ============================================================ rating 记录
+    OjRatingRecord:
+      type: object
+      description: |
+        **一次 rating 观测**（一个历史点）。原始数据只有"某时刻的 rating"：
+        采集器给出 `judge` / `handle` / `rating` / `at` 即可，**不需要 `delta`**——
+        `delta` 由服务端与同一 `judge`+`handle` 的**上一条**记录相减派生（首条为
+        `null`），`rank` / `performance` / `max_rating` 也只在平台提供时才存在。
+
+        自然键：带 `contest_id` 时用 `(judge, handle, contest_id)`（同场次重复上报
+        不会产生第二条记录），否则退化为 `(judge, handle, at)`。
+      required:
+        - id
+        - judge
+        - handle
+        - rating
+        - at
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        handle:
+          type: string
+          description: OJ 账号名（外部平台原始值）。
+          minLength: 1
+          maxLength: 64
+          examples:
+            - tourist
+        principal_id:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Id'
+            - type: 'null'
+          description: 已绑定的主体 id；未绑定时为 `null`。
+        contest:
+          oneOf:
+            - $ref: '#/components/schemas/OjContestRef'
+            - type: 'null'
+          description: 触发本次变化的比赛；平台未提供时为 `null`。
+        rating:
+          type: integer
+          description: 该时刻的 rating（观测值本身，独立成立）。
+          examples:
+            - 3721
+        delta:
+          type:
+            - integer
+            - 'null'
+          description: |
+            与同一 `judge`+`handle` **上一条**记录的 `rating` 之差，可为负；首条为
+            `null`。这是**服务端派生**的展示字段，不是上报的必需数据。
+          examples:
+            - 42
+        max_rating:
+          type: [integer, 'null']
+          description: 该时刻的历史最高 rating（若平台提供）；未知为 `null`。
+          examples:
+            - 3800
+        rank:
+          type: [integer, 'null']
+          description: 本场名次；未知为 `null`。
+          examples:
+            - 7
+        performance:
+          type: [integer, 'null']
+          description: 本场表现分（performance）；平台无该概念时为 `null`。
+          examples:
+            - 3810
+        at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        ingested_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+      examples:
+        - id: rch_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          judge: codeforces
+          handle: tourist
+          principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          contest:
+            judge: codeforces
+            contest_id: '1873'
+            name: Codeforces Round 898 (Div. 4)
+            url: https://codeforces.com/contest/1873
+            started_at: '2023-09-21T14:35:00.000Z'
+          rating: 3721
+          delta: 42
+          max_rating: 3800
+          rank: 7
+          performance: 3810
+          at: '2023-09-21T16:35:00.000Z'
+          ingested_at: '2024-05-06T07:01:00.000Z'
+
+    # ============================================================ 账号快照
+    OjHandleStats:
+      description: |
+        单个 OJ 绑定的统计详情，供 `/oj/handles/{handle_id}/stats` 按时间窗返回。
+        在聚合摘要 `OjHandleSummary` 之上追加：时间窗、最近提交样本与 rating 曲线点。
+        本结构只包含公开的 OJ 数据，不含手机号/学号等 PII。
+      allOf:
+        - $ref: '#/components/schemas/OjHandleSummary'
+        - type: object
+          required:
+            - handle_id
+            - judge
+            - handle
+            - window
+            - recent_submissions
+            - rating_points
+          properties:
+            handle_id:
+              $ref: './common.yaml#/components/schemas/Id'
+            judge:
+              $ref: './common.yaml#/components/schemas/Judge'
+            handle:
+              type: string
+              description: OJ 账号名（外部平台原始值）。
+              minLength: 1
+              maxLength: 64
+              examples:
+                - tourist
+            window:
+              $ref: './common.yaml#/components/schemas/Duration'
+              description: 本次统计采用的时间窗（回看时长），与请求参数 `window` 一致。
+            recent_submissions:
+              type: array
+              description: 时间窗内最近的提交样本，按 `submitted_at` 倒序，最多 20 条。
+              maxItems: 20
+              items:
+                $ref: '#/components/schemas/OjSubmission'
+            rating_points:
+              type: array
+              description: 时间窗内的 rating 曲线点，按 `at` 升序；用于前端绘图。
+              items:
+                type: object
+                description: rating 曲线上的一个采样点。
+                required:
+                  - at
+                  - rating
+                properties:
+                  at:
+                    $ref: './common.yaml#/components/schemas/Timestamp'
+                  rating:
+                    type: integer
+                    description: 该时刻的 rating。
+                    examples:
+                      - 3721
+      examples:
+        - handle_id: ojh_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          judge: codeforces
+          handle: tourist
+          window: P90D
+          rating: 3721
+          max_rating: 3800
+          rating_delta_30d: 42
+          solved_count: 1873
+          attempted_count: 2104
+          submissions_30d: 96
+          active_days_30d: 21
+          computed_at: '2024-05-06T07:00:05.000Z'
+          recent_submissions:
+            - id: sub_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              judge: codeforces
+              submission_id: '223456789'
+              handle: tourist
+              principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              problem:
+                judge: codeforces
+                external_id: 1873A
+                title: Short Sort
+              verdict: accepted
+              verdict_raw: OK
+              language: GNU C++17
+              submitted_at: '2024-05-06T06:59:12.000Z'
+              ingested_at: '2024-05-06T07:01:00.000Z'
+              contest: null
+              is_first_ac: true
+          rating_points:
+            - at: '2024-05-01T00:00:00.000Z'
+              rating: 3679
+            - at: '2024-05-06T00:00:00.000Z'
+              rating: 3721
+
+    # ============================================================== 分页响应
+    PagedOjProblem:
+      description: 题目列表的偏移分页响应。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/PageMeta'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页的题目。
+              items:
+                $ref: '#/components/schemas/OjProblem'
+      examples:
+        - page: 1
+          size: 20
+          total: 137
+          has_next: true
+          items:
+            - id: pbl_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              judge: codeforces
+              external_id: 1873A
+              title: Short Sort
+              url: https://codeforces.com/contest/1873/problem/A
+              tags:
+                - implementation
+              difficulty: 800
+              rating: 800
+              solved_count: 12
+              attempt_count: 19
+              first_seen_at: '2024-04-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:00:00.000Z'
+
+    OjSubmissionPage:
+      description: 提交记录的游标分页响应，固定按 `submitted_at` 倒序。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/CursorPageMeta'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页的提交记录。
+              items:
+                $ref: '#/components/schemas/OjSubmission'
+      examples:
+        - has_more: true
+          next_cursor: eyJ0IjoiMjAyNC0wNS0wNlQwNjo1OToxMi4wMDBaIiwiaWQiOiJzdWJfMDFKOFo1VjZRMEszTTdOOVAyUjRUNlc4WDAifQ
+          items:
+            - id: sub_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              judge: codeforces
+              submission_id: '223456789'
+              handle: tourist
+              principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              problem:
+                judge: codeforces
+                external_id: 1873A
+                title: Short Sort
+              verdict: accepted
+              verdict_raw: OK
+              language: GNU C++17
+              submitted_at: '2024-05-06T06:59:12.000Z'
+              ingested_at: '2024-05-06T07:01:00.000Z'
+              contest: null
+              is_first_ac: true
+
+    OjRatingHistoryPage:
+      description: rating 历史（观测记录序列）的游标分页响应，固定按 `at` 倒序。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/CursorPageMeta'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页的 rating 观测记录，按 `at` 倒序。
+              items:
+                $ref: '#/components/schemas/OjRatingRecord'
+      examples:
+        - has_more: false
+          next_cursor: null
+          items:
+            - id: rch_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              judge: codeforces
+              handle: tourist
+              principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              contest: null
+              rating: 3721
+              delta: 42
+              max_rating: 3800
+              rank: 7
+              performance: 3810
+              at: '2023-09-21T16:35:00.000Z'
+              ingested_at: '2024-05-06T07:01:00.000Z'
+            - id: rch_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+              judge: atcoder
+              handle: tourist
+              principal_id: null
+              contest: null
+              rating: 2843
+              delta: null
+              max_rating: null
+              rank: null
+              performance: null
+              at: '2024-05-01T00:00:00.000Z'
+              ingested_at: '2024-05-06T07:02:00.000Z'
+
+    # ====================================================== ingest 写入通道
+    IngestSubmissionItem:
+      type: object
+      description: |
+        单条提交上报。`submission_id` 是外部平台的原始提交编号，
+        `(judge, submission_id)` 即该记录的自然键——同一自然键重复上报会被判为
+        `duplicate` 而不是错误，也不会覆盖已存记录。
+      required:
+        - judge
+        - submission_id
+        - handle
+        - problem
+        - submitted_at
+      properties:
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        submission_id:
+          type: string
+          description: 外部平台的原始提交编号。
+          minLength: 1
+          maxLength: 128
+          examples:
+            - '223456789'
+        handle:
+          type: string
+          description: 提交者的 OJ 账号名（外部平台原始值）。
+          minLength: 1
+          maxLength: 64
+          examples:
+            - tourist
+        problem:
+          $ref: '#/components/schemas/OjProblemRef'
+          description: |
+            题目引用；其中 `judge` 与 `external_id` 必填（自然键 `(judge, external_id)`），
+            其余字段可留空由服务端补全或后续上报补齐。
+        verdict:
+          oneOf:
+            - $ref: '#/components/schemas/OjVerdict'
+            - type: 'null'
+          description: 归一化评测结果；结果未出或无法归类时省略。
+        verdict_raw:
+          type: [string, 'null']
+          description: 平台原始评测结果文本。
+          examples:
+            - OK
+        language:
+          type: [string, 'null']
+          description: 提交语言（平台原始写法）。
+          examples:
+            - GNU C++17
+        submitted_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+          description: |
+            平台上的提交时刻。允许**乱序**（早于已存记录），但必须在容忍区间
+            `now-3y .. now+1d` 内，否则该条被判为 `rejected`。
+        contest_id:
+          type: [string, 'null']
+          description: 外部平台的原始比赛编号；练习提交省略。
+          examples:
+            - '1873'
+        contest_name:
+          type: [string, 'null']
+          description: 比赛名称，用于在服务器侧补全比赛信息。
+          examples:
+            - Codeforces Round 898 (Div. 4)
+        is_first_ac:
+          type: boolean
+          description: 采集器判断的"是否首次 AC"提示；服务端仍会按自然键独立判定。
+      examples:
+        - judge: codeforces
+          submission_id: '223456789'
+          handle: tourist
+          problem:
+            judge: codeforces
+            external_id: 1873A
+            title: Short Sort
+            url: https://codeforces.com/contest/1873/problem/A
+          verdict: accepted
+          verdict_raw: OK
+          language: GNU C++17
+          submitted_at: '2024-05-06T06:59:12.000Z'
+          contest_id: '1873'
+          contest_name: Codeforces Round 898 (Div. 4)
+          is_first_ac: true
+
+    IngestSubmissionsRequest:
+      type: object
+      description: |
+        提交记录的批量上报请求。**自然键 `(judge, submission_id)`**：
+        同一自然键的条目只写一次，重复上报记为 `duplicate`，不是错误。
+
+        单条校验失败只影响该条（记为 `rejected`），其余照常写入，整体仍返回 `200`；
+        整个批次条目数超过 `capabilities.ingest_batch_max` 时返回 `413`，**整批不入库**。
+        条目允许乱序，`submitted_at` 可以早于服务器已存记录。
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          description: 本次上报的提交条目，至少 1 条、至多 500 条（上限即 `ingest_batch_max`）。
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/IngestSubmissionItem'
+        crawler_run_id:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Id'
+            - type: 'null'
+          description: |
+            本次上报对应的采集器运行 id，见 `POST /crawler/runs` 返回的 `CrawlerRun`，
+            用于把入库条目与某次抓取关联起来；不关联时省略或传 `null`。
+      examples:
+        - crawler_run_id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          items:
+            - judge: codeforces
+              submission_id: '223456789'
+              handle: tourist
+              problem:
+                judge: codeforces
+                external_id: 1873A
+                title: Short Sort
+              verdict: accepted
+              verdict_raw: OK
+              language: GNU C++17
+              submitted_at: '2024-05-06T06:59:12.000Z'
+              contest_id: '1873'
+              contest_name: Codeforces Round 898 (Div. 4)
+              is_first_ac: true
+            - judge: codeforces
+              submission_id: '223456790'
+              handle: tourist
+              problem:
+                judge: codeforces
+                external_id: 1873B
+              verdict: wrong_answer
+              verdict_raw: WRONG_ANSWER
+              language: GNU C++17
+              submitted_at: '2024-05-06T07:00:03.000Z'
+              contest_id: '1873'
+
+    IngestRatingRecordItem:
+      type: object
+      description: |
+        **单条 rating 上报：只需要"某时刻的 rating"**。自然键带 `contest_id` 时为
+        `(judge, handle, contest_id)`，省略时退化为 `(judge, handle, at)`；
+        同一自然键重复上报记为 `duplicate`，不是错误。
+
+        `delta` **不是上报字段**：它由服务端按同一账号的相邻记录派生。平台没有比赛
+        概念时，例如按周期抓取的 rating 快照，只给 `rating` 与 `at` 即可。
+      required:
+        - judge
+        - handle
+        - rating
+        - at
+      properties:
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        handle:
+          type: string
+          description: OJ 账号名（外部平台原始值）。
+          minLength: 1
+          maxLength: 64
+          examples:
+            - tourist
+        contest_id:
+          type: string
+          description: |
+            外部平台的原始比赛编号。**可省略**——省略时自然键退化为
+            `(judge, handle, at)`。
+          minLength: 1
+          maxLength: 128
+          examples:
+            - '1873'
+        contest_name:
+          type: [string, 'null']
+          description: 比赛名称，用于补全比赛信息。
+          examples:
+            - Codeforces Round 898 (Div. 4)
+        rating:
+          type: integer
+          description: 该时刻的 rating（观测值本身）。
+          examples:
+            - 3721
+        max_rating:
+          type: [integer, 'null']
+          description: 该时刻的历史最高 rating；平台未提供时省略。
+          examples:
+            - 3800
+        rank:
+          type: [integer, 'null']
+          description: 本场名次。
+          examples:
+            - 7
+        performance:
+          type: [integer, 'null']
+          description: 本场表现分。
+          examples:
+            - 3810
+        at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+          description: rating 生效时刻，必须在容忍区间 `now-3y .. now+1d` 内。
+      examples:
+        - judge: codeforces
+          handle: tourist
+          contest_id: '1873'
+          contest_name: Codeforces Round 898 (Div. 4)
+          rating: 3721
+          max_rating: 3800
+          rank: 7
+          performance: 3810
+          at: '2023-09-21T16:35:00.000Z'
+        - judge: atcoder
+          handle: tourist
+          rating: 2843
+          at: '2024-05-01T00:00:00.000Z'
+
+    IngestRatingRecordsRequest:
+      type: object
+      description: |
+        rating 记录的批量上报请求。**自然键 `(judge, handle, contest_id)`；
+        省略 `contest_id` 时为 `(judge, handle, at)`**：同一自然键只写一次，
+        重复上报记为 `duplicate`，不是错误。条目里的 `delta` 无需提供。
+
+        单条校验失败只影响该条（记为 `rejected`），其余照常写入，整体仍返回 `200`；
+        整个批次条目数超过 `capabilities.ingest_batch_max` 时返回 `413`，**整批不入库**。
+        条目允许乱序。
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          description: 本次上报的 rating 条目，至少 1 条、至多 500 条。
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/IngestRatingRecordItem'
+        crawler_run_id:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Id'
+            - type: 'null'
+          description: 本次上报对应的采集器运行 id；不关联时省略。
+      examples:
+        - crawler_run_id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          items:
+            - judge: codeforces
+              handle: tourist
+              contest_id: '1873'
+              contest_name: Codeforces Round 898 (Div. 4)
+              rating: 3721
+              max_rating: 3800
+              rank: 7
+              performance: 3810
+              at: '2023-09-21T16:35:00.000Z'
+            - judge: atcoder
+              handle: tourist
+              rating: 2843
+              at: '2024-05-01T00:00:00.000Z'
+
+    IngestHandleSnapshotItem:
+      type: object
+      description: |
+        单个账号指标快照上报。自然键为 `(judge, handle, captured_at)`：
+        同一时刻重复上报记为 `duplicate`。所有指标字段都可省略，省略即表示"未知"。
+      required:
+        - judge
+        - handle
+        - captured_at
+      properties:
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        handle:
+          type: string
+          description: OJ 账号名（外部平台原始值）。
+          minLength: 1
+          maxLength: 64
+          examples:
+            - tourist
+        captured_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+          description: 快照采样时刻，必须在容忍区间 `now-3y .. now+1d` 内。
+        rating:
+          type: [integer, 'null']
+          description: 快照时刻的 rating。
+          examples:
+            - 3721
+        max_rating:
+          type: [integer, 'null']
+          description: 快照时刻的历史最高 rating。
+          examples:
+            - 3800
+        solved_count:
+          type: [integer, 'null']
+          description: 快照时刻的解题数。
+          examples:
+            - 1873
+        attempted_count:
+          type: [integer, 'null']
+          description: 快照时刻的尝试题数。
+          examples:
+            - 2104
+        submissions_30d:
+          type: [integer, 'null']
+          description: 快照时刻回看 30 天的提交数。
+          examples:
+            - 96
+        active_days_30d:
+          type: [integer, 'null']
+          description: 快照时刻回看 30 天的活跃天数。
+          examples:
+            - 21
+      examples:
+        - judge: codeforces
+          handle: tourist
+          captured_at: '2024-05-06T00:00:00.000Z'
+          rating: 3721
+          max_rating: 3800
+          solved_count: 1873
+          attempted_count: 2104
+          submissions_30d: 96
+          active_days_30d: 21
+
+    IngestHandleSnapshotsRequest:
+      type: object
+      description: |
+        账号指标快照的批量上报请求。**自然键 `(judge, handle, captured_at)`**：
+        同一时刻的条目只写一次，重复上报记为 `duplicate`，不是错误。
+
+        单条校验失败只影响该条（记为 `rejected`），其余照常写入，整体仍返回 `200`；
+        整个批次条目数超过 `capabilities.ingest_batch_max` 时返回 `413`，**整批不入库**。
+        条目允许乱序。
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          description: 本次上报的快照条目，至少 1 条、至多 500 条。
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/IngestHandleSnapshotItem'
+        crawler_run_id:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Id'
+            - type: 'null'
+          description: 本次上报对应的采集器运行 id；不关联时省略。
+      examples:
+        - crawler_run_id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          items:
+            - judge: codeforces
+              handle: tourist
+              captured_at: '2024-05-06T00:00:00.000Z'
+              rating: 3721
+              max_rating: 3800
+              solved_count: 1873
+              attempted_count: 2104
+              submissions_30d: 96
+              active_days_30d: 21
+
+    IngestProblemItem:
+      type: object
+      description: |
+        单条题目元数据上报。自然键为 `(judge, external_id)`：重复上报记为 `duplicate`，
+        已存在的题目只会用非空字段补全缺失信息，不会清空已有值。
+      required:
+        - judge
+        - external_id
+        - title
+      properties:
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        external_id:
+          type: string
+          description: 外部平台的原始题目编号。
+          minLength: 1
+          maxLength: 128
+          examples:
+            - 1873A
+        title:
+          type: string
+          description: 题目标题。
+          minLength: 1
+          maxLength: 300
+          examples:
+            - Short Sort
+        tags:
+          type: array
+          description: 算法/平台标签。
+          items:
+            type: string
+          examples:
+            - - implementation
+        difficulty:
+          type: [integer, 'null']
+          description: 平台自身的难度分值。
+          examples:
+            - 800
+        rating:
+          type: [integer, 'null']
+          description: 平台自身的难度 rating。
+          examples:
+            - 800
+        url:
+          type: [string, 'null']
+          description: 题目页面 URL。
+          examples:
+            - https://codeforces.com/contest/1873/problem/A
+      examples:
+        - judge: codeforces
+          external_id: 1873A
+          title: Short Sort
+          tags:
+            - implementation
+          difficulty: 800
+          rating: 800
+          url: https://codeforces.com/contest/1873/problem/A
+
+    IngestProblemsRequest:
+      type: object
+      description: |
+        题目元数据的批量上报请求。**自然键 `(judge, external_id)`**：
+        重复上报记为 `duplicate`，不是错误。
+
+        单条校验失败只影响该条（记为 `rejected`），其余照常写入，整体仍返回 `200`；
+        整个批次条目数超过 `capabilities.ingest_batch_max` 时返回 `413`，**整批不入库**。
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          description: 本次上报的题目条目，至少 1 条、至多 500 条。
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/IngestProblemItem'
+        crawler_run_id:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Id'
+            - type: 'null'
+          description: 本次上报对应的采集器运行 id；不关联时省略。
+      examples:
+        - crawler_run_id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          items:
+            - judge: codeforces
+              external_id: 1873A
+              title: Short Sort
+              tags:
+                - implementation
+              difficulty: 800
+              rating: 800
+              url: https://codeforces.com/contest/1873/problem/A
+
+    IngestItemResult:
+      type: object
+      description: |
+        批次中单条上报的处理结果。`index` 与该条在请求 `items` 数组中的下标一一对应。
+        `status` 取值：`accepted`（新写入）、`duplicate`（自然键已存在，**不是错误**）、
+        `rejected`（该条校验失败，未写入）。`rejected` 时 `code` / `message` /
+        `pointer` 给出原因，`pointer` 是 RFC 6901 JSON Pointer，例如 `/items/3/submitted_at`。
+      required:
+        - index
+        - status
+      properties:
+        index:
+          type: integer
+          minimum: 0
+          description: 该条在请求 `items` 数组中的下标（从 0 开始）。
+          examples:
+            - 0
+        status:
+          type: string
+          description: 该条的处理结果。
+          enum:
+            - accepted
+            - duplicate
+            - rejected
+          examples:
+            - accepted
+        id:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Id'
+            - type: 'null'
+          description: |
+            写入或命中已有记录后的资源 id；`rejected` 时为 `null`。
+        code:
+          type: [string, 'null']
+          description: |
+            失败子码（`rejected` 时）。与 `ProblemCode` 对齐的取值如
+            `validation_failed`、`judge_not_supported`、`unprocessable_entity`；
+            重复项不是错误，因此不会出现与去重相关的 code。
+          examples:
+            - judge_not_supported
+        message:
+          type: [string, 'null']
+          description: 面向人的失败说明。
+          examples:
+            - judge=other 未在 capabilities.judges 内启用
+        pointer:
+          type: [string, 'null']
+          description: 指向请求体中出错位置的 JSON Pointer。
+          examples:
+            - /items/3/judge
+      examples:
+        - index: 0
+          status: accepted
+          id: sub_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          code: null
+          message: null
+          pointer: null
+
+    IngestResult:
+      type: object
+      description: |
+        ingest 批次的处理结果。**HTTP 200 + 逐条 `items` 结果表示部分成功**：
+        批次已被接受，`accepted` / `duplicates` / `rejected` 是各类条目的计数，
+        `items` 与请求条目按 `index` 一一对应。
+
+        **幂等由自然键保证**（提交 `(judge, submission_id)`、rating
+        `(judge, handle, contest_id)`、快照 `(judge, handle, captured_at)`、
+        题目 `(judge, external_id)`）：重复条目记为 `duplicate`，**不是错误**，
+        也不会覆盖已存记录。整个批次超过 `ingest_batch_max` 时返回
+        `413 payload_too_large`，整批拒绝且无副作用；单条校验失败
+        ，例如 `submitted_at` 超出 `now-3y .. now+1d`、`judge` 未启用只把该条记为
+        `rejected`，其余照常写入。
+
+        **乱序接受**：`submitted_at` / `at` / `captured_at` 允许早于已存记录，
+        服务端按自然键 upsert，不要求顺序。
+
+        **时序**：写入立即可被后续 ingest 感知，但统计、榜单与公开查询是**最终一致**的；
+        `materialized_at` 给出聚合结果可见的时刻（`x-freshness-bound: PT15M`）。
+      required:
+        - accepted
+        - duplicates
+        - rejected
+        - items
+      properties:
+        accepted:
+          type: integer
+          minimum: 0
+          description: 新写入的条目数。
+          examples:
+            - 2
+        duplicates:
+          type: integer
+          minimum: 0
+          description: 自然键已存在、被判为重复的条目数，不是错误。
+          examples:
+            - 1
+        rejected:
+          type: integer
+          minimum: 0
+          description: 校验失败、未写入的条目数；`items` 中对应条目 `status=rejected`。
+          examples:
+            - 1
+        items:
+          type: array
+          description: 逐条处理结果，与请求 `items` 按 `index` 一一对应。
+          items:
+            $ref: '#/components/schemas/IngestItemResult'
+        crawler_run_id:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Id'
+            - type: 'null'
+          description: 请求中携带的采集器运行 id 回显；未携带时为 `null`。
+        materialized_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: |
+            本批数据在聚合视图（统计、榜单、`/oj/*` 查询）中可见的时刻；
+            为 `null` 表示尚未排入物化，客户端应按 `x-freshness-bound` 退避轮询。
+      examples:
+        - accepted: 2
+          duplicates: 1
+          rejected: 1
+          crawler_run_id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          materialized_at: '2024-05-06T07:15:00.000Z'
+          items:
+            - index: 0
+              status: accepted
+              id: sub_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              code: null
+              message: null
+              pointer: null
+            - index: 1
+              status: duplicate
+              id: sub_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+              code: null
+              message: null
+              pointer: null
+            - index: 2
+              status: accepted
+              id: sub_01J8Z5V6Q0K3M7N9P2R4T6W8X2
+              code: null
+              message: null
+              pointer: null
+            - index: 3
+              status: rejected
+              id: null
+              code: validation_failed
+              message: submitted_at 必须落在 now-3y .. now+1d 之内
+              pointer: /items/3/submitted_at
+
+    # ========================================================== 采集器配置
+    ProxyHealth:
+      type: object
+      description: |
+        代理服务器的最近一次健康探测结果。`unknown` 表示尚未探测或探测结果已过期，
+        此时采集器仍可尝试使用该代理，按 `strategy` 决定顺序。
+      required:
+        - state
+      properties:
+        state:
+          type: string
+          description: 健康状态。
+          enum:
+            - unknown
+            - healthy
+            - unhealthy
+          examples:
+            - healthy
+        checked_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 最近一次探测时刻；从未探测为 `null`。
+        latency_ms:
+          type: [integer, 'null']
+          description: 最近一次探测的往返毫秒数；探测失败或未探测为 `null`。
+          minimum: 0
+          examples:
+            - 128
+        last_error:
+          type: [string, 'null']
+          description: 最近一次失败的原因摘要；健康时为 `null`。
+          examples:
+            - 'dial tcp 10.0.0.9:1080: connect: connection refused'
+      examples:
+        - state: healthy
+          checked_at: '2024-05-06T07:00:00.000Z'
+          latency_ms: 128
+          last_error: null
+
+    ProxyServer:
+      type: object
+      description: |
+        一个可选的代理服务器。采集器**先直连目标平台，只有在 `direct_timeout` 内失败后**
+        才按 `ProxyConfig.strategy` 使用本列表中的代理。
+
+        `password` 是**只写字段（writeOnly）**：只在 `PATCH /crawler/config` 的请求体里出现，
+        **任何响应（包括 `GET /crawler/config`）都绝不回传明文**；客户端通过
+        `has_password` 判断该代理是否已配置口令。`username` 会正常回传。
+      required:
+        - id
+        - label
+        - url
+        - enabled
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        label:
+          type: string
+          description: 人类可读的代理名称，用于在日志与状态里识别。
+          minLength: 1
+          maxLength: 64
+          examples:
+            - hk-1
+        url:
+          type: string
+          description: |
+            代理地址，形如 `socks5://host:1080`、`http://host:3128`、
+            `https://user@host:443`。支持 `socks5`、`socks5h`、`http`、`https`。
+          pattern: '^(socks5h?|https?)://[^\s]+$'
+          examples:
+            - socks5://10.0.0.9:1080
+        username:
+          type: [string, 'null']
+          description: 代理认证用户名；无需认证时为 `null`。响应中正常回传。
+          examples:
+            - crawler
+        password:
+          type: [string, 'null']
+          writeOnly: true
+          description: |
+            代理认证口令明文。**只写**：仅在 `PATCH /crawler/config` 请求体中出现，
+            任何响应都返回 `null` 或不返回该字段，用 `has_password` 代替。
+            传 `null` 表示清除已存口令。
+          examples:
+            - s3cr3t-proxy-pass
+        has_password:
+          type: boolean
+          readOnly: true
+          description: 服务端是否已保存该代理的口令；只读，由服务端计算。
+          examples:
+            - true
+        enabled:
+          type: boolean
+          description: 该代理是否参与回退；`false` 时被完全跳过。
+        priority:
+          type: integer
+          minimum: 0
+          description: "优先级，数值越小越先尝试（`strategy: failover` 时生效）。"
+          default: 100
+          examples:
+            - 10
+        health:
+          oneOf:
+            - $ref: '#/components/schemas/ProxyHealth'
+            - type: 'null'
+          description: 最近一次健康探测结果；从未探测为 `null`。
+      examples:
+        - id: pxy_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          label: hk-1
+          url: socks5://10.0.0.9:1080
+          username: crawler
+          has_password: true
+          enabled: true
+          priority: 10
+          health:
+            state: healthy
+            checked_at: '2024-05-06T07:00:00.000Z'
+            latency_ms: 128
+            last_error: null
+
+    ProxyConfig:
+      type: object
+      description: |
+        代理回退配置。**仅当直连失败时使用代理**：采集器先按 `direct_timeout`
+        直连目标平台；只有连接失败、TLS 错误、超时，或返回 `429`/`5xx` 时，
+        才按 `strategy` 从 `proxies` 中挑选 `enabled: true` 的服务器重试。
+
+        - `failover`：按 `priority` 升序依次尝试，直到成功或列表耗尽。
+        - `round_robin`：在可用代理间轮转，分散出口 IP。
+        - `always`：跳过直连，始终走代理，仅用于直连完全不可达的部署。
+
+        `no_proxy` 中的主机名匹配的请求永不使用代理。
+      required:
+        - enabled
+        - strategy
+        - direct_timeout
+        - proxies
+      properties:
+        enabled:
+          type: boolean
+          description: 代理回退总开关；`false` 时即使直连失败也不使用任何代理。
+        strategy:
+          type: string
+          description: 代理选择策略。
+          enum:
+            - failover
+            - round_robin
+            - always
+          examples:
+            - failover
+        direct_timeout:
+          $ref: './common.yaml#/components/schemas/Duration'
+          description: |
+            单次直连的超时，默认 `PT10S`。**只有超过该时长仍未成功才回退代理**，
+            因此该值应小于平台的整体请求超时。
+        proxies:
+          type: array
+          description: 候选代理列表；顺序由 `priority` 与 `strategy` 共同决定。
+          items:
+            $ref: '#/components/schemas/ProxyServer'
+        no_proxy:
+          type: array
+          description: 永不使用代理的主机名后缀列表，例如 `*.dmu.edu.cn`；缺省为空数组。
+          items:
+            type: string
+          examples:
+            - - '*.dmu.edu.cn'
+              - localhost
+      examples:
+        - enabled: true
+          strategy: failover
+          direct_timeout: PT10S
+          no_proxy:
+            - '*.dmu.edu.cn'
+          proxies:
+            - id: pxy_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              label: hk-1
+              url: socks5://10.0.0.9:1080
+              username: crawler
+              has_password: true
+              enabled: true
+              priority: 10
+              health:
+                state: healthy
+                checked_at: '2024-05-06T07:00:00.000Z'
+                latency_ms: 128
+                last_error: null
+
+    CrawlerJudgeConfig:
+      type: object
+      description: |
+        单个平台的采集配置。`interval` 覆盖全局 `schedule.interval`；
+        `extra` 存放平台特有参数，例如需要登录的平台的账号名，服务端原样透传给采集器。
+      required:
+        - judge
+        - enabled
+      properties:
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        enabled:
+          type: boolean
+          description: 是否采集该平台；`false` 时采集器应跳过该平台。
+        interval:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Duration'
+            - type: 'null'
+          description: 该平台的采集间隔；`null` 表示沿用全局 `schedule.interval`。
+        max_pages:
+          type: [integer, 'null']
+          minimum: 1
+          description: 单次运行最多抓取的列表页数，用于限制回填深度；`null` 表示不限制。
+          examples:
+            - 20
+        extra:
+          type: [object, 'null']
+          additionalProperties: true
+          description: 平台特有的键值对，由服务端原样下发，契约不约束其结构。
+          examples:
+            - handle_batch_size: 25
+      examples:
+        - judge: codeforces
+          enabled: true
+          interval: PT15M
+          max_pages: 20
+          extra:
+            handle_batch_size: 25
+
+    CrawlerConfig:
+      type: object
+      description: |
+        采集器/采集器的完整配置。**由服务器持有并下发**：完全独立的采集器通过
+        `GET /crawler/config` 拉取本对象，据此决定采集哪些平台、以什么频率采集、
+        直连失败后回退到哪些代理。
+
+        `mode` 由服务器能力决定、**客户端只读**：`embedded` 表示服务器代管采集器运行
+        （`POST /crawler/trigger` 可用），`external` 表示采集器完全独立
+        （只走 ingest 写入通道或与服务器共用数据库）。
+
+        配置变更在服务器侧是**强一致**的（`PATCH` 返回后下一次 `GET` 立即看到新值），
+        但采集器在**下一次拉取配置之前仍在使用旧值**，因此生效滞后上界为
+        `schedule.interval`，默认 `PT30M`。
+      required:
+        - revision
+        - mode
+        - enabled
+        - judges
+        - schedule
+        - rate_limit
+        - proxy
+        - updated_at
+      properties:
+        revision:
+          type: string
+          description: 配置版本标记，与 `GET /crawler/config` 的 `ETag` 一致；`PATCH` 时用 `If-Match` 做乐观并发控制。
+          examples:
+            - '7'
+        mode:
+          type: string
+          description: |
+            运行形态，由服务器能力决定、客户端只读：
+            `embedded`（服务器代管，`POST /crawler/trigger` 可用）或
+            `external`（采集器独立运行，代管触发返回 `409 crawler_not_embedded`）。
+          enum:
+            - embedded
+            - external
+          examples:
+            - embedded
+        enabled:
+          type: boolean
+          description: 采集总开关；`false` 时调度器不再触发任何平台，外部采集器应停止上报并进入休眠。
+        judges:
+          type: array
+          description: |
+            各平台的采集配置。只允许出现 `GET /meta` 的 `capabilities.judges` 中
+            已启用的平台，否则 `PATCH` 返回 `422 validation_failed`。
+          items:
+            $ref: '#/components/schemas/CrawlerJudgeConfig'
+        schedule:
+          type: object
+          description: |
+            默认调度参数，可被单个 `judges[].interval` 覆盖。
+            `interval` 默认 `PT30M`、`jitter` 默认 `PT2M`、`timezone` 默认 `Asia/Shanghai`。
+          required:
+            - interval
+            - jitter
+            - timezone
+          properties:
+            interval:
+              $ref: './common.yaml#/components/schemas/Duration'
+              description: 相邻两次采集的基准间隔，默认 `PT30M`。
+            jitter:
+              $ref: './common.yaml#/components/schemas/Duration'
+              description: 在上一次运行结束后随机追加的抖动上限，默认 `PT2M`，避免固定节奏被平台限流。
+            timezone:
+              type: string
+              description: 解释 `active_hours` 的 IANA 时区名，默认 `Asia/Shanghai`。
+              examples:
+                - Asia/Shanghai
+            active_hours:
+              type: object
+              description: |
+                允许采集的时间窗，按 `timezone` 解释，`from` 含、`to` 不含；
+                省略表示全天可采集，跨零点窗口，例如 `22:00`–`06:00`也合法。
+              required:
+                - from
+                - to
+              properties:
+                from:
+                  type: string
+                  pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+                  description: 窗口起始时刻 `HH:MM`（24 小时制，含）。
+                  examples:
+                    - '08:00'
+                to:
+                  type: string
+                  pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+                  description: 窗口结束时刻 `HH:MM`（24 小时制，不含）。
+                  examples:
+                    - '23:30'
+        rate_limit:
+          type: object
+          description: 采集器对单个平台的默认请求节流；平台特有的更严限制由采集器自行遵守。
+          required:
+            - requests_per_minute
+            - concurrency
+          properties:
+            requests_per_minute:
+              type: integer
+              minimum: 1
+              maximum: 600
+              description: 对同一平台每分钟最多发起的 HTTP 请求数。
+              examples:
+                - 60
+            concurrency:
+              type: integer
+              minimum: 1
+              maximum: 16
+              description: 对同一平台允许的最大并发请求数。
+              examples:
+                - 2
+        proxy:
+          $ref: '#/components/schemas/ProxyConfig'
+        retention:
+          type: object
+          description: 采集结果的保留期；超期数据由服务端清理，客户端不得依赖更早的历史。
+          required:
+            - submissions
+            - runs
+          properties:
+            submissions:
+              $ref: './common.yaml#/components/schemas/Duration'
+              description: |
+                提交/rating/快照原始记录的保留期。**权威值见 `Config.retention.submissions`**
+                （默认 `P2Y`，即约 730 天）；这里只是回显，避免与配置各说各话。
+            runs:
+              $ref: './common.yaml#/components/schemas/Duration'
+              description: 采集器运行记录的保留期，默认 `P90D`。
+        updated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+      examples:
+        - revision: '7'
+          mode: embedded
+          enabled: true
+          judges:
+            - judge: codeforces
+              enabled: true
+              interval: PT15M
+              max_pages: 20
+              extra: null
+            - judge: atcoder
+              enabled: true
+              interval: null
+              max_pages: null
+              extra: null
+          schedule:
+            interval: PT30M
+            jitter: PT2M
+            timezone: Asia/Shanghai
+            active_hours:
+              from: '08:00'
+              to: '23:30'
+          rate_limit:
+            requests_per_minute: 60
+            concurrency: 2
+          proxy:
+            enabled: true
+            strategy: failover
+            direct_timeout: PT10S
+            no_proxy:
+              - '*.dmu.edu.cn'
+            proxies:
+              - id: pxy_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                label: hk-1
+                url: socks5://10.0.0.9:1080
+                username: crawler
+                has_password: true
+                enabled: true
+                priority: 10
+                health: null
+          retention:
+            submissions: P2Y
+            runs: P90D
+          updated_at: '2024-05-06T07:00:00.000Z'
+
+    CrawlerConfigPatch:
+      type: object
+      description: |
+        采集器配置的局部更新请求。未出现的字段保持不变；出现的字段**整体替换**
+        （`proxy` 是整体替换，包括其中的 `proxies` 数组——要新增代理就提交完整数组，
+        数组里被移除的代理会被删除）。
+
+        `mode` 由服务器能力决定，不在本结构内，提交它会被 `422 validation_failed` 拒绝。
+        变更在服务器侧强一致生效；外部采集器在下一次 `GET /crawler/config` 后才会使用新值。
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+          description: 采集总开关。
+        judges:
+          type: array
+          description: |
+            平台采集配置的完整列表（整体替换）。只能包含 `capabilities.judges` 中已启用的平台。
+          items:
+            $ref: '#/components/schemas/CrawlerJudgeConfig'
+        schedule:
+          type: object
+          description: 默认调度参数（整体替换）。
+          required:
+            - interval
+            - jitter
+            - timezone
+          properties:
+            interval:
+              $ref: './common.yaml#/components/schemas/Duration'
+              description: 相邻两次采集的基准间隔。
+            jitter:
+              $ref: './common.yaml#/components/schemas/Duration'
+              description: 采集抖动的上限。
+            timezone:
+              type: string
+              description: 解释 `active_hours` 的 IANA 时区名。
+              examples:
+                - Asia/Shanghai
+            active_hours:
+              type: object
+              description: 允许采集的时间窗（`from` 含、`to` 不含）。
+              required:
+                - from
+                - to
+              properties:
+                from:
+                  type: string
+                  pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+                  examples:
+                    - '08:00'
+                to:
+                  type: string
+                  pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+                  examples:
+                    - '23:30'
+        rate_limit:
+          type: object
+          description: 单平台请求节流（整体替换）。
+          required:
+            - requests_per_minute
+            - concurrency
+          properties:
+            requests_per_minute:
+              type: integer
+              minimum: 1
+              maximum: 600
+              examples:
+                - 60
+            concurrency:
+              type: integer
+              minimum: 1
+              maximum: 16
+              examples:
+                - 2
+        proxy:
+          $ref: '#/components/schemas/ProxyConfig'
+        retention:
+          type: object
+          description: 采集结果保留期（整体替换）。
+          required:
+            - submissions
+            - runs
+          properties:
+            submissions:
+              $ref: './common.yaml#/components/schemas/Duration'
+              description: 原始采集记录的保留期。
+            runs:
+              $ref: './common.yaml#/components/schemas/Duration'
+              description: 采集器运行记录的保留期。
+      examples:
+        - enabled: true
+          proxy:
+            enabled: true
+            strategy: failover
+            direct_timeout: PT10S
+            no_proxy:
+              - '*.dmu.edu.cn'
+            proxies:
+              - id: pxy_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                label: hk-1
+                url: socks5://10.0.0.9:1080
+                username: crawler
+                password: s3cr3t-proxy-pass
+                enabled: true
+                priority: 10
+
+    # ========================================================== 采集器运行
+    CrawlerRunState:
+      type: string
+      description: |
+        采集器运行的状态机：`queued`（已接受、等待执行）→ `running` →
+        `succeeded`（全部条目成功）或 `failed`（整体失败，无有效产出）。
+        `partial` 表示运行本身结束但存在被拒绝/失败的条目（批次部分成功），
+        是终态之一。终态不可再回到 `queued`/`running`。
+      enum:
+        - queued
+        - running
+        - succeeded
+        - failed
+        - partial
+      examples:
+        - succeeded
+
+    CrawlerRunTrigger:
+      type: string
+      description: |
+        运行由谁触发：`schedule`（服务器调度器按 `schedule` 自动触发）、
+        `manual`（管理员在服务器侧手工触发）、`api`（外部采集器通过 API 上报自己的运行）。
+      enum:
+        - schedule
+        - manual
+        - api
+      examples:
+        - schedule
+
+    CrawlerRunCounts:
+      type: object
+      description: |
+        一次采集运行的条目计数。`fetched` 是从平台取到的条目数，
+        `accepted` / `duplicates` / `rejected` 与 `IngestResult` 的语义一致
+        （重复不是错误），`failed` 是因网络或解析原因未能处理的条目数。
+      required:
+        - fetched
+        - accepted
+        - duplicates
+        - rejected
+        - failed
+      properties:
+        fetched:
+          type: integer
+          minimum: 0
+          description: 从平台抓取到的原始条目数。
+          examples:
+            - 120
+        accepted:
+          type: integer
+          minimum: 0
+          description: 新写入服务器的条目数。
+          examples:
+            - 96
+        duplicates:
+          type: integer
+          minimum: 0
+          description: 因自然键已存在而被判为重复的条目数，不是错误。
+          examples:
+            - 23
+        rejected:
+          type: integer
+          minimum: 0
+          description: 校验失败、未写入的条目数。
+          examples:
+            - 1
+        failed:
+          type: integer
+          minimum: 0
+          description: 因网络/解析失败而未处理的条目数。
+          examples:
+            - 0
+      examples:
+        - fetched: 120
+          accepted: 96
+          duplicates: 23
+          rejected: 1
+          failed: 0
+
+    CrawlerRun:
+      type: object
+      description: |
+        一次采集运行的记录。既可能是服务器代管的运行（`POST /crawler/trigger` 触发），
+        也可能是外部采集器通过 `POST /crawler/runs` 上报的自己的运行——
+        两条路径互不影响，只在本资源里汇合。
+
+        `report_note` 是上报方附加的自由文本说明；`error` 是失败原因摘要。
+        `proxy_used` / `proxy_failures` 记录本次运行是否实际用到代理以及代理失败次数，
+        用于验证"直连失败后才回退代理"的策略是否生效。
+      required:
+        - id
+        - judge
+        - state
+        - started_at
+        - counts
+      properties:
+        id:
+          $ref: './common.yaml#/components/schemas/Id'
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        state:
+          $ref: '#/components/schemas/CrawlerRunState'
+        trigger:
+          $ref: '#/components/schemas/CrawlerRunTrigger'
+        started_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        finished_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 运行结束时刻；仍在 `running` 时为 `null`。
+        counts:
+          $ref: '#/components/schemas/CrawlerRunCounts'
+        proxy_used:
+          type: boolean
+          description: 本次运行是否至少有一次请求经由代理，即直连失败后发生了回退。
+        proxy_failures:
+          type: integer
+          minimum: 0
+          description: 本次运行中代理连接失败或被代理拒绝的次数。
+          examples:
+            - 0
+        error:
+          type: [string, 'null']
+          description: 运行失败（`failed` / `partial`）时的原因摘要；成功时为 `null`。
+          examples:
+            - atcoder 第 3 页连续 5 次超时
+        report_note:
+          type: [string, 'null']
+          description: 上报方附加的自由文本说明，例如 "手动补抓 2023 春季题单"。
+          examples:
+            - 手动补抓 2023 春季题单
+      examples:
+        - id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+          judge: codeforces
+          state: partial
+          trigger: schedule
+          started_at: '2024-05-06T07:00:00.000Z'
+          finished_at: '2024-05-06T07:03:20.000Z'
+          counts:
+            fetched: 120
+            accepted: 96
+            duplicates: 23
+            rejected: 1
+            failed: 0
+          proxy_used: true
+          proxy_failures: 0
+          error: null
+          report_note: null
+
+    CrawlerRunReportRequest:
+      type: object
+      description: |
+        **外部采集器**上报自己一次运行的请求体（`POST /crawler/runs`）。
+        上报方必须给出该运行的自然身份信息（平台、状态、开始时刻与计数），
+        `finished_at` 在 `state` 为终态时必填。
+
+        该端点与 `POST /crawler/trigger`（服务器代管触发）是**两条互不影响的路**：
+        前者不触发任何服务端采集，只登记运行记录；后者会真的让服务端去抓取。
+      required:
+        - judge
+        - state
+        - started_at
+        - counts
+      properties:
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        state:
+          $ref: '#/components/schemas/CrawlerRunState'
+          description: 本次运行结束时的状态；外部上报通常为 `succeeded`/`failed`/`partial`。
+        trigger:
+          $ref: '#/components/schemas/CrawlerRunTrigger'
+          description: 外部采集器上报时通常为 `api`；省略时服务端记 `api`。
+        started_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+        finished_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 运行结束时刻；`state` 为终态时必填，否则应为 `null`。
+        counts:
+          $ref: '#/components/schemas/CrawlerRunCounts'
+        proxy_used:
+          type: boolean
+          description: 本次运行是否至少有一次请求经由代理。
+        proxy_failures:
+          type: integer
+          minimum: 0
+          description: 本次运行中代理失败次数。
+          examples:
+            - 0
+        error:
+          type: [string, 'null']
+          description: 失败原因摘要；成功时省略或为 `null`。
+      examples:
+        - judge: codeforces
+          state: succeeded
+          trigger: api
+          started_at: '2024-05-06T07:00:00.000Z'
+          finished_at: '2024-05-06T07:03:20.000Z'
+          counts:
+            fetched: 120
+            accepted: 96
+            duplicates: 23
+            rejected: 1
+            failed: 0
+          proxy_used: false
+          proxy_failures: 0
+          error: null
+
+    PagedCrawlerRun:
+      description: 采集器运行记录的游标分页响应，固定按 `started_at` 倒序。
+      allOf:
+        - $ref: './common.yaml#/components/schemas/CursorPageMeta'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              description: 当前页的运行记录。
+              items:
+                $ref: '#/components/schemas/CrawlerRun'
+      examples:
+        - has_more: true
+          next_cursor: eyJ0IjoiMjAyNC0wNS0wNlQwNzowMDowMC4wMDBaIiwiaWQiOiJydW5fMDFKOFo1VjZRMEszTTdOOVAyUjRUNlc4WDAifQ
+          items:
+            - id: run_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              judge: codeforces
+              state: succeeded
+              trigger: schedule
+              started_at: '2024-05-06T07:00:00.000Z'
+              finished_at: '2024-05-06T07:03:20.000Z'
+              counts:
+                fetched: 120
+                accepted: 96
+                duplicates: 23
+                rejected: 1
+                failed: 0
+              proxy_used: false
+              proxy_failures: 0
+              error: null
+              report_note: null
+
+    # ========================================================== 代管触发
+    TriggerCrawlerRunRequest:
+      type: object
+      description: |
+        请求服务器代管触发一次采集（`POST /crawler/trigger`）。仅在
+        `GET /meta` 的 `capabilities.crawler_embedded = true`（`CrawlerConfig.mode =
+        embedded`）时可用，否则返回 `409 crawler_not_embedded`；
+        同一 `judge` 已有运行中的任务时返回 `409 crawler_run_in_progress`。
+      required:
+        - judge
+      properties:
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        full:
+          type: boolean
+          default: false
+          description: |
+            是否执行全量回填：`true` 时忽略增量游标，从最早可见页开始抓取（代价高，
+            仅用于首次接入或数据修复）；默认 `false` 只抓增量。
+        since:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: |
+            增量抓取的起点（只处理该时刻之后的提交）；省略时使用服务器为该平台
+            记录的上次成功游标。与 `full: true` 同时给出时 `full` 优先。
+      examples:
+        - judge: codeforces
+          full: false
+          since: '2024-05-01T00:00:00.000Z'
+
+    # ========================================================== 采集器状态
+    JudgeCollectionStatus:
+      type: object
+      description: |
+        单个平台的采集健康度。`lag` 是"已采集数据的最新时刻"与"当前时刻"之差
+        （数据滞后），`consecutive_failures` 连续失败次数达到阈值时服务端会告警；
+        该字段为 0 说明最近一次尝试成功。
+      required:
+        - judge
+        - enabled
+        - consecutive_failures
+      properties:
+        judge:
+          $ref: './common.yaml#/components/schemas/Judge'
+        enabled:
+          type: boolean
+          description: 该平台当前是否启用采集（来自 `CrawlerConfig.judges[]`）。
+        last_attempt_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 最近一次采集尝试的时刻；从未尝试为 `null`。
+        last_success_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 最近一次采集成功的时刻；从未成功为 `null`。
+        lag:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Duration'
+            - type: 'null'
+          description: 数据滞后（已采集数据的最新时刻与当前时刻之差）；无数据为 `null`。
+          examples:
+            - PT12M
+        consecutive_failures:
+          type: integer
+          minimum: 0
+          description: 连续失败次数；成功一次即归零。
+          examples:
+            - 0
+        last_error:
+          type: [string, 'null']
+          description: 最近一次失败的原因摘要；当前健康时为 `null`。
+          examples:
+            - 'ProxyError: 所有代理均不可用'
+        using_proxy:
+          type: boolean
+          description: 最近一次尝试是否使用了代理，即直连失败并已回退。
+        collected_24h:
+          type: integer
+          minimum: 0
+          description: 最近 24 小时内采集入库的条目数。
+          examples:
+            - 512
+      examples:
+        - judge: codeforces
+          enabled: true
+          last_attempt_at: '2024-05-06T07:00:00.000Z'
+          last_success_at: '2024-05-06T07:03:20.000Z'
+          lag: PT12M
+          consecutive_failures: 0
+          last_error: null
+          using_proxy: false
+          collected_24h: 512
+
+    CrawlerStatus:
+      type: object
+      description: |
+        采集的实时状态快照：总体开关、调度时刻、各平台健康度、
+        待处理条目与代理池概况。**最终一致视图**：由采集器心跳与 ingest 元数据聚合而来，
+        可能滞后至多 `x-freshness-bound`；`generated_at` 是快照生成时刻。
+      required:
+        - mode
+        - enabled
+        - judges
+        - pending_items
+        - generated_at
+      properties:
+        mode:
+          type: string
+          description: 运行形态，与 `CrawlerConfig.mode` 一致（由服务器能力决定）。
+          enum:
+            - embedded
+            - external
+          examples:
+            - embedded
+        enabled:
+          type: boolean
+          description: 采集总开关的当前值。
+        last_run_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 最近一次采集运行（任意平台）的开始时刻；从未运行为 `null`。
+        next_run_at:
+          oneOf:
+            - $ref: './common.yaml#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 调度器计划的下一次运行时刻；`mode=external` 或未启用时为 `null`。
+        judges:
+          type: array
+          description: 各平台的采集健康度。
+          items:
+            $ref: '#/components/schemas/JudgeCollectionStatus'
+        pending_items:
+          type: integer
+          minimum: 0
+          description: 已接收但尚未在聚合视图中物化的条目数（0 表示统计已追平）。
+          examples:
+            - 0
+        proxy_summary:
+          oneOf:
+            - type: object
+              description: 代理池按健康状态汇总的数量。
+              required:
+                - healthy
+                - unhealthy
+                - unknown
+              properties:
+                healthy:
+                  type: integer
+                  minimum: 0
+                  description: 健康代理数。
+                  examples:
+                    - 1
+                unhealthy:
+                  type: integer
+                  minimum: 0
+                  description: 不健康代理数。
+                  examples:
+                    - 0
+                unknown:
+                  type: integer
+                  minimum: 0
+                  description: 尚未探测或结果已过期的代理数。
+                  examples:
+                    - 1
+            - type: 'null'
+          description: 代理池健康度汇总；未配置任何代理时为 `null`。
+        generated_at:
+          $ref: './common.yaml#/components/schemas/Timestamp'
+      examples:
+        - mode: embedded
+          enabled: true
+          last_run_at: '2024-05-06T07:00:00.000Z'
+          next_run_at: '2024-05-06T07:32:00.000Z'
+          judges:
+            - judge: codeforces
+              enabled: true
+              last_attempt_at: '2024-05-06T07:00:00.000Z'
+              last_success_at: '2024-05-06T07:03:20.000Z'
+              lag: PT12M
+              consecutive_failures: 0
+              last_error: null
+              using_proxy: false
+              collected_24h: 512
+          pending_items: 0
+          proxy_summary:
+            healthy: 1
+            unhealthy: 0
+            unknown: 1
+          generated_at: '2024-05-06T07:05:00.000Z'

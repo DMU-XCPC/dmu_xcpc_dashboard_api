@@ -1,0 +1,499 @@
+login:
+  post:
+    tags:
+      - auth
+    operationId: login
+    summary: 登录并签发令牌对
+    description: |
+      用账号口令换取会话令牌对。成功后可立即访问 `/auth/me`。
+
+      **语义**：口令校验使用 Argon2id；失败一律返回 `401 unauthenticated`（不区分
+      "用户不存在"与"口令错误"，避免用户名枚举）。连续失败会按 IP + 用户名限流，
+      触发后返回 `429`。`refresh_token` 一次性使用，每次刷新都会轮换。
+
+      **时序**：本接口为强一致，返回时令牌已可立即使用。响应中的 `principal`
+      是登录瞬间的快照，`last_active_at` 已在本请求内更新。
+    security: []
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/LoginRequest
+          example:
+            username: alice
+            password: correct-horse-battery-staple
+            device_name: Chrome on macOS
+    responses:
+      '200':
+        description: 登录成功，返回令牌对与主体快照。
+        headers:
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+          X-RateLimit-Limit:
+            $ref: ../components/headers/common.yaml#/components/headers/RateLimitLimit
+          X-RateLimit-Remaining:
+            $ref: ../components/headers/common.yaml#/components/headers/RateLimitRemaining
+          X-RateLimit-Reset:
+            $ref: ../components/headers/common.yaml#/components/headers/RateLimitReset
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/identity.yaml#/components/schemas/TokenPair
+            example:
+              access_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.session-opaque
+              token_type: Bearer
+              expires_in: 1800
+              refresh_token: xcr_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              refresh_expires_in: 2592000
+              principal:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+                labels:
+                  - member
+                scopes:
+                  - account:self
+                  - member:read
+                status: active
+                created_at: '2023-09-01T02:00:00.000Z'
+                updated_at: '2024-05-06T07:08:09.123Z'
+                revision: '17'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: false
+    x-consistency: strong
+
+    x-idempotency-exempt: true
+refresh:
+  post:
+    tags:
+      - auth
+    operationId: refreshToken
+    summary: 用刷新令牌换取新的令牌对
+    description: |
+      **语义**：刷新令牌单次使用。成功后返回**全新的**访问令牌与刷新令牌，
+      旧的刷新令牌立即作废（令牌轮换）。
+
+      若旧刷新令牌被重复使用，可能已泄露：服务端使整条令牌族失效，
+      返回 `401 invalid_token`，用户需要重新登录。因此客户端必须串行化刷新，
+      并在并发 401 时只发起一次刷新、其余请求等待其结果。
+
+      **时序**：强一致；返回的 `refresh_token` 在响应产生前已写入存储。
+    security: []
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/RefreshRequest
+          example:
+            refresh_token: xcr_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+    responses:
+      '200':
+        description: 刷新成功，返回轮换后的令牌对。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/identity.yaml#/components/schemas/TokenPair
+            example:
+              access_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.session-opaque-2
+              token_type: Bearer
+              expires_in: 1800
+              refresh_token: xcr_01J8Z5V6Q0K3M7N9P2R4T6W8X1
+              refresh_expires_in: 2592000
+              principal:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+                labels:
+                  - member
+                scopes:
+                  - account:self
+                status: active
+                created_at: '2023-09-01T02:00:00.000Z'
+                updated_at: '2024-05-06T07:08:09.123Z'
+                revision: '17'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: false
+    x-consistency: strong
+
+    x-idempotency-exempt: true
+logout:
+  post:
+    tags:
+      - auth
+    operationId: logout
+    summary: 登出并撤销会话令牌
+    description: |
+      **语义**：撤销当前访问令牌所属会话；带 `refresh_token` 可撤销指定会话，
+      `all_sessions=true` 撤销该主体全部 `session` 凭证（`api_key` 不受影响）。
+
+      **幂等**：总是返回 `204`，即使令牌已撤销或不存在——重复调用安全。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    requestBody:
+      required: false
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/LogoutRequest
+          example:
+            all_sessions: false
+    responses:
+      '204':
+        $ref: ../components/responses/common.yaml#/components/responses/NoContent
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+    x-idempotency-exempt: true
+me:
+  get:
+    tags:
+      - auth
+    operationId: getCurrentPrincipal
+    summary: 获取当前主体
+    description: |
+      返回当前主体本体、所用凭证与**实际生效的 scope 集合**。前端据此决定
+      界面可见性。
+
+      **缓存**：带 `ETag`；`If-None-Match` 命中返回 `304`。匿名访问时
+      `credential` 为 `null`，`effective_scopes` 为匿名集合，可能为空。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+      - {}
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 当前主体。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/identity.yaml#/components/schemas/Me
+            example:
+              id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              username: alice
+              display_name: 张三
+              kind: human
+              labels:
+                - member
+              scopes:
+                - account:self
+                - member:read
+              profile:
+                student_id: '2220210000'
+                enrollment_year: 2022
+                grade: 2022级
+                club_memberships:
+                  - club: acm_icpc
+                    status: active
+                    registered_at: '2023-09-20'
+                    role: 成员
+              status: active
+              last_active_at: '2024-05-06T07:08:09.123Z'
+              created_at: '2023-09-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:08:09.123Z'
+              revision: '17'
+              credential:
+                id: cred_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                kind: session
+                name: Chrome on macOS
+                prefix: xcp_7f3a
+                scopes:
+                  - account:self
+                  - member:read
+                created_at: '2024-05-06T06:00:00.000Z'
+                expires_at: '2024-06-05T06:00:00.000Z'
+                last_used_at: '2024-05-06T07:08:09.123Z'
+                revoked_at: null
+              effective_scopes:
+                - account:self
+                - member:read
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+  patch:
+    tags:
+      - auth
+    operationId: updateCurrentPrincipal
+    summary: 修改自己的展示名与档案
+    description: |
+      自助修改自己的展示名与档案。**档案本来就是成员自己填的**，因此默认允许自助维护；
+      能改哪些字段由 `profile:*` 这组 scope 按字段组控制：
+
+      | 字段 | 需要 |
+      | --- | --- |
+      | `display_name` | `profile:display` |
+      | `profile.email`、`profile.phone`、`profile.qq`、`profile.remark` | `profile:contact` |
+      | `profile.student_id`、`profile.enrollment_year`、`profile.major` | `profile:academic` |
+
+      社团身份走 `PUT /auth/me/clubs`，需要 `profile:clubs`。`username`、`kind`、
+      `labels`、`scopes`、`status` 一律不可自助修改，需要 `account:manage` / `member:assign`。
+
+      **部分变更**：请求里出现的字段才会被改，未出现的保持不变；因此"只想改手机号"就
+      只发 `phone` 一个字段。
+
+      **越权字段**：请求里出现调用者没有对应 scope 的字段时，整个请求失败并返回
+      `403 insufficient_scope`，`errors[]` 逐个指出越权字段的 `pointer`，不会部分生效。
+
+      **语义**：`profile` 为合并式更新（`null` 表示清空该字段）。
+      并发修改可用 `If-Match` 携带上次读到的 `ETag`，不匹配返回 `412`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/UpdateMeRequest
+          example:
+            display_name: 张三（队长）
+            profile:
+              major: 软件工程
+    responses:
+      '200':
+        description: 更新后的当前主体。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/identity.yaml#/components/schemas/Me
+            example:
+              id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              username: alice
+              display_name: 张三（队长）
+              kind: human
+              labels:
+                - member
+              scopes:
+                - account:self
+              status: active
+              created_at: '2023-09-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:30:00.000Z'
+              revision: '18'
+              credential: null
+              effective_scopes:
+                - account:self
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+meClubs:
+  put:
+    tags:
+      - auth
+    operationId: setOwnClubs
+    summary: 登记或退出自己的社团
+    description: |
+      **用途**：成员自主登记自己属于哪个社团。集训队挂靠海风社团软件部 Safewind 与
+      ACM/ICPC 学社，成员可以只注册其中一个，也可以两个都注册；这是成员自助填表的一部分，
+      不需要管理员介入。
+
+      **权限**：需要 `profile:clubs`。默认模板 `user` 就含它；要收窄个别成员，去掉该
+      scope 即可，此后由管理员用 `PUT /members/{member_id}/clubs` 代改。
+
+      **语义**：与管理员端点 `PUT /members/{member_id}/clubs` 写的是**同一份数据**、
+      同样是**整体替换**：请求里的 `memberships` 即最终集合，未出现的社团会被置为
+      `alumni` 并保留注册日期。两者只差授权范围：本端点只能改自己，管理端点可改任何人。
+
+      **部分变更**：即使只想动一个社团，也要提交完整集合。先 `GET /auth/me` 读出
+      `profile.club_memberships`，改完再整体提交即可。
+
+      **结果可见性**：写入立即反映在 `profile.club_memberships`；成员名单视角的
+      `clubs` 是它的派生视图，见 `GET /members/{member_id}`。
+
+      **副作用**：写审计记录，`actor` 是自己，因此管理员能看出这是一次自助登记；
+      同时改变活跃度按社团切分的统计范围。
+
+      **并发**：支持 `If-Match` + `revision`，不匹配返回 `412 precondition_failed`。
+      **幂等**：必须携带 `Idempotency-Key`，同键重放返回首次结果。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfMatch
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/roster.yaml#/components/schemas/SetMemberClubsRequest
+          example:
+            memberships:
+              - club: acm_icpc
+                status: active
+                registered_at: '2024-03-01'
+                role: 成员
+              - club: safewind_software
+                status: active
+                registered_at: '2023-09-20'
+                role: 干事
+    responses:
+      '200':
+        description: 更新后的当前主体；社团记录在 `profile.club_memberships`。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/identity.yaml#/components/schemas/Me
+            example:
+              id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              username: alice
+              display_name: 张三
+              kind: human
+              labels:
+                - member
+              scopes:
+                - account:self
+                - profile:clubs
+              profile:
+                student_id: '2220210000'
+                enrollment_year: 2022
+                club_memberships:
+                  - club: acm_icpc
+                    status: active
+                    registered_at: '2024-03-01'
+                    role: 成员
+                  - club: safewind_software
+                    status: active
+                    registered_at: '2023-09-20'
+                    role: 干事
+              status: active
+              created_at: '2023-09-01T02:00:00.000Z'
+              updated_at: '2024-05-06T07:45:00.000Z'
+              revision: '20'
+              credential:
+                id: cred_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                kind: session
+                name: Chrome on macOS
+                prefix: xcp_7f3a
+                scopes:
+                  - account:self
+                  - profile:clubs
+                created_at: '2024-05-06T06:00:00.000Z'
+                expires_at: '2024-06-05T06:00:00.000Z'
+              effective_scopes:
+                - account:self
+                - profile:clubs
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '412':
+        $ref: ../components/responses/common.yaml#/components/responses/PreconditionFailed
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+mePassword:
+  put:
+    tags:
+      - auth
+    operationId: changePassword
+    summary: 修改自己的口令
+    description: |
+      **语义**：校验 `current_password` 后设置新口令（Argon2id）。成功后除当前会话外的
+      全部 `session` 凭证立即失效，`api_key` 不受影响。
+
+      **幂等性**：非幂等——同一请求重放时 `current_password` 已不再有效，
+      会返回 `422`。客户端不得自动重试本接口。
+    security:
+      - bearerAuth: []
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/ChangePasswordRequest
+          example:
+            current_password: correct-horse-battery-staple
+            new_password: a-much-longer-new-passphrase
+    responses:
+      '204':
+        $ref: ../components/responses/common.yaml#/components/responses/NoContent
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: false
+    x-consistency: strong
+
+    x-idempotency-exempt: true

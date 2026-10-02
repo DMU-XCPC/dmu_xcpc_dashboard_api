@@ -1,0 +1,250 @@
+components:
+  responses:
+    BadRequest:
+      description: 请求语法或参数无法解析，例如时间格式错误、未知枚举值。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/common.yaml#/components/schemas/Problem'
+          example:
+            type: https://docs.dmu-xcpc.example/errors/bad_request
+            title: Bad request
+            status: 400
+            code: bad_request
+            detail: 无法解析查询参数 updated_since
+            instance: /api/v1/members?updated_since=yesterday
+
+    Unauthenticated:
+      description: 缺少凭证、凭证无效或已过期。
+      headers:
+        WWW-Authenticate:
+          description: 认证方案提示，`Bearer realm="dmu-xcpc", error="invalid_token"`。
+          schema:
+            type: string
+        X-Request-Id:
+          $ref: '../headers/common.yaml#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/common.yaml#/components/schemas/Problem'
+          examples:
+            missing:
+              value:
+                type: https://docs.dmu-xcpc.example/errors/unauthenticated
+                title: Authentication required
+                status: 401
+                code: unauthenticated
+                detail: 缺少 Authorization 头
+            expired:
+              value:
+                type: https://docs.dmu-xcpc.example/errors/token_expired
+                title: Token expired
+                status: 401
+                code: token_expired
+                detail: 会话令牌已于 2024-05-06T07:08:09.123Z 过期，请刷新或重新登录
+
+    Forbidden:
+      description: 已认证但权限不足（scope 不满足），或资源对该主体不可见。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/common.yaml#/components/schemas/Problem'
+          example:
+            type: https://docs.dmu-xcpc.example/errors/insufficient_scope
+            title: Insufficient scope
+            status: 403
+            code: insufficient_scope
+            detail: 凭证缺少 member:manage 权限，当前 scopes 为 [member:read]
+
+    NotFound:
+      description: 目标资源不存在，或存在但对当前主体不可见（避免信息泄露）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/common.yaml#/components/schemas/Problem'
+          example:
+            type: https://docs.dmu-xcpc.example/errors/not_found
+            title: Resource not found
+            status: 404
+            code: not_found
+            detail: 账号 acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0 不存在
+
+    Conflict:
+      description: 与当前资源状态冲突（唯一性、状态机、配额、去重键）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/common.yaml#/components/schemas/Problem'
+          examples:
+            duplicate:
+              value:
+                type: https://docs.dmu-xcpc.example/errors/handle_already_linked
+                title: Handle already linked
+                status: 409
+                code: handle_already_linked
+                detail: codeforces 账号 alice 已被 acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0 绑定
+            quota:
+              value:
+                type: https://docs.dmu-xcpc.example/errors/quota_exceeded
+                title: Quota exceeded
+                status: 409
+                code: quota_exceeded
+                detail: 名额池 quota_total=6 已用尽，无法再批准
+
+    PreconditionFailed:
+      description: '`If-Match` 与当前 `revision` 不一致（并发修改）。'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/common.yaml#/components/schemas/Problem'
+          example:
+            type: https://docs.dmu-xcpc.example/errors/version_conflict
+            title: Version conflict
+            status: 412
+            code: version_conflict
+            detail: 期望 revision "17"，当前为 "19"
+
+    PayloadTooLarge:
+      description: 请求体超过上限，或批量条目数超过 `ingest_batch_max`。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/common.yaml#/components/schemas/Problem'
+          example:
+            type: https://docs.dmu-xcpc.example/errors/payload_too_large
+            title: Payload too large
+            status: 413
+            code: payload_too_large
+            detail: 本批次 812 条，超过 ingest_batch_max=500
+
+    UnsupportedMediaType:
+      description: 请求体媒体类型不受支持（本 API 只接受 `application/json`，永不接受 XML）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/common.yaml#/components/schemas/Problem'
+          example:
+            type: https://docs.dmu-xcpc.example/errors/unsupported_media_type
+            title: Unsupported media type
+            status: 415
+            code: unsupported_media_type
+            detail: 只支持 application/json；本服务不支持 XML 表示
+
+    UnprocessableEntity:
+      description: 语法正确但语义校验失败（字段级错误见 `errors`）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/common.yaml#/components/schemas/Problem'
+          example:
+            type: https://docs.dmu-xcpc.example/errors/validation_failed
+            title: Validation failed
+            status: 422
+            code: validation_failed
+            detail: 2 个字段未通过校验
+            errors:
+              - pointer: /handle
+                message: handle 只允许字母、数字与 ._-
+                code: pattern
+              - pointer: /enrollment_year
+                message: enrollment_year 必须在 2000..2100 之间
+                code: out_of_range
+
+    RateLimited:
+      description: 触发限流；按 `Retry-After` 退避后重试。
+      headers:
+        Retry-After:
+          $ref: '../headers/common.yaml#/components/headers/RetryAfter'
+        X-RateLimit-Limit:
+          $ref: '../headers/common.yaml#/components/headers/RateLimitLimit'
+        X-RateLimit-Remaining:
+          $ref: '../headers/common.yaml#/components/headers/RateLimitRemaining'
+        X-RateLimit-Reset:
+          $ref: '../headers/common.yaml#/components/headers/RateLimitReset'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/common.yaml#/components/schemas/Problem'
+          example:
+            type: https://docs.dmu-xcpc.example/errors/rate_limited
+            title: Rate limit exceeded
+            status: 429
+            code: rate_limited
+            detail: 每分钟 600 次的配额已用尽
+            retry_after_seconds: 12
+
+    InternalError:
+      description: 服务端内部错误；可安全地按幂等语义重试。
+      headers:
+        X-Request-Id:
+          $ref: '../headers/common.yaml#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/common.yaml#/components/schemas/Problem'
+          example:
+            type: https://docs.dmu-xcpc.example/errors/internal_error
+            title: Internal error
+            status: 500
+            code: internal_error
+            detail: 数据库连接池耗尽
+            request_id: req_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+
+    ServiceUnavailable:
+      description: 服务暂时不可用（维护、依赖故障）；按 `Retry-After` 重试。
+      headers:
+        Retry-After:
+          $ref: '../headers/common.yaml#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/common.yaml#/components/schemas/Problem'
+          example:
+            type: https://docs.dmu-xcpc.example/errors/service_unavailable
+            title: Service unavailable
+            status: 503
+            code: service_unavailable
+            detail: 正在应用配置变更，预计 30 秒后恢复
+
+    NotModified:
+      description: 条件读取命中，资源未变化，无响应体。
+      headers:
+        ETag:
+          $ref: '../headers/common.yaml#/components/headers/ETag'
+
+    ExportExpired:
+      description: |
+        `410 Gone`：异步导出的产物已被保留策略清理（`RosterExport.status=expired`），
+        下载链接与产物都不再可用，只能重新发起导出。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/common.yaml#/components/schemas/Problem'
+          example:
+            type: https://docs.dmu-xcpc.example/errors/export_expired
+            title: Export expired
+            status: 410
+            code: export_expired
+            detail: 导出 exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0 的产物已于 2024-05-07T07:08:09.123Z 被保留策略清理，请重新发起导出
+            instance: /api/v1/roster/exports/exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0/download
+            request_id: req_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+
+    CursorExpired:
+      description: |
+        `410 Gone`：增量同步游标早于变更保留期，客户端必须重新基线化——
+        不带 `since` 重新握手拿到当前游标，再对相关资源做一次全量拉取。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/common.yaml#/components/schemas/Problem'
+          example:
+            type: https://docs.dmu-xcpc.example/errors/cursor_expired
+            title: Cursor expired
+            status: 410
+            code: cursor_expired
+            detail: 游标早于变更保留期 P30D，请省略 since 重新建立基线并全量拉取
+            instance: /api/v1/sync/changes?since=eyJ0IjoiMjAyNC0wMS0wMVQwMDowMDowMC4wMDBaIn0
+            request_id: req_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+
+    NoContent:
+      description: 操作成功且无响应体。

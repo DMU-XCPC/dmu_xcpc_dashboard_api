@@ -1,0 +1,759 @@
+statsTrend:
+  get:
+    tags:
+      - stats
+    operationId: getStatsTrend
+    summary: 训练 trend 时间序列
+    description: |
+      **权限**：公开读。匿名可读仅当服务器 `capabilities.public_read=true`；否则需要认证
+      并持有 `stats:read`（或 `stats:*`、`*`）。匿名且 `public_read=false` 返回 `401`，
+      已认证但缺少 `stats:read` 返回 `403 insufficient_scope`。
+
+      **语义**：按 `metric` 对 `scope` 口径的主体/队伍做时间序列聚合，可用 `group_by`
+      分组（每组返回 `points` 与 `series_summary`）。`judges`、`team_ids`、
+      `enrollment_years`、`labels`、`principal_id`、`handle` 收窄样本；`from`/`to`
+      指定窗口（闭开区间，默认最近 90 天）。桶边界与 `hour`/`day`/`week` 的归属一律按
+      查询的 `timezone` 计算，响应中的 `bucket_start`/`bucket_end` 仍是 UTC 时刻。
+      `bucket=hour` 只允许查询最近 30 天，超出返回 `422 validation_failed`。
+
+      **时序**：本端点读取**物化聚合**，返回值可能落后于采集写入：`generated_at` 是物化
+      完成时刻，`stale=true` 表示已超过 `PT1H` 新鲜度上界。此时应等待调度器的
+      后台的周期性物化任务重建（契约不提供手动重建端点），重建完成前返回的是上一版结果。
+      响应中的 `query` 回显解析后的窗口、时区与默认值，客户端不必自己猜默认值。
+
+      **错误分支**：参数无法解析（时间格式、未知枚举、`hour` 超出 30 天）为
+      `400`/`422`；样本为空不是错误，返回 `groups` 内无点的组。
+    security:
+      - {}
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: metric
+        in: query
+        required: true
+        description: |
+          要统计的指标。`solved_count` 累计解题数、`submissions` 提交数、`accepted`
+          通过数、`rating` 平均 rating、`active_members` 活跃成员数、
+          `acceptance_rate` 通过率（0..1）、`rating_delta` 区间内 rating 变化量。
+        schema:
+          $ref: ../components/schemas/boards.yaml#/components/schemas/TrendMetric
+        example: solved_count
+      - name: scope
+        in: query
+        required: false
+        description: 聚合口径，默认 `individual`；`team` 时按队伍聚合。
+        schema:
+          $ref: ../components/schemas/boards.yaml#/components/schemas/ScoreboardScope
+        example: individual
+      - name: group_by
+        in: query
+        required: false
+        description: |
+          分组维度，默认 `none`（返回单个 `key=all` 的组）。`judge` 按平台、`team`
+          按队伍、`enrollment_year` 按入学年份、`label` 按标签分组。
+        schema:
+          $ref: ../components/schemas/boards.yaml#/components/schemas/StatsGroupBy
+        example: judge
+      - name: judges
+        in: query
+        required: false
+        description: |
+          平台过滤，可重复传参（`judges=codeforces&judges=atcoder`）；省略表示全部已启用平台。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/common.yaml#/components/schemas/Judge
+        example:
+          - codeforces
+          - atcoder
+      - name: team_ids
+        in: query
+        required: false
+        description: 队伍过滤，可重复传参；`scope=team` 时限定被统计的队伍。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example:
+          - team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: enrollment_years
+        in: query
+        required: false
+        description: 入学年份过滤，可重复传参；省略表示不限年级。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: integer
+            minimum: 1990
+            maximum: 2100
+        example:
+          - 2022
+          - 2023
+      - name: labels
+        in: query
+        required: false
+        description: 标签过滤，可重复传参；命中任一标签即纳入。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/Label
+        example:
+          - member
+      - name: clubs
+        in: query
+        required: false
+        description: |
+          社团过滤：只统计属于这些社团之一的成员，可重复传参，命中任一即纳入。
+          两个社团的名单不同，看"某个社团的训练情况"时用它。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/ClubCode
+          minItems: 1
+          maxItems: 2
+        example:
+          - acm_icpc
+      - name: principal_id
+        in: query
+        required: false
+        description: 只统计该主体；与 `handle` 互斥，同时给出返回 `422`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: handle
+        in: query
+        required: false
+        description: 只统计该 OJ 账号（须已绑定）；与 `principal_id` 互斥。
+        schema:
+          type: string
+          maxLength: 64
+        example: alice
+      - name: from
+        in: query
+        required: false
+        description: 窗口起点，含；默认 `to - 90 天`。与 `bucket=hour` 组合时窗口不得超 30 天。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-02-06T00:00:00.000Z'
+      - name: to
+        in: query
+        required: false
+        description: 窗口终点，不含；默认取当前时刻。必须晚于 `from`，否则 `422`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-05-06T00:00:00.000Z'
+      - name: bucket
+        in: query
+        required: false
+        description: |
+          切桶粒度，默认 `day`。`hour` 仅允许查询最近 30 天；`week` 以时区周一为起点；
+          `month` 按自然月。
+        schema:
+          $ref: ../components/schemas/boards.yaml#/components/schemas/TrendBucket
+        example: day
+      - name: timezone
+        in: query
+        required: false
+        description: |
+          聚合切桶使用的 IANA 时区，默认 `Asia/Shanghai`。桶边界按该时区的自然日/小时
+          划分，响应中的时间仍是 UTC。
+        schema:
+          type: string
+          default: Asia/Shanghai
+        example: Asia/Shanghai
+    responses:
+      '200':
+        description: trend 序列，含解析后的查询回显与物化新鲜度。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/boards.yaml#/components/schemas/StatsTrendResponse
+            example:
+              query:
+                scope: individual
+                judges:
+                  - codeforces
+                from: '2024-02-06T00:00:00.000Z'
+                to: '2024-05-06T00:00:00.000Z'
+                timezone: Asia/Shanghai
+                bucket: day
+                group_by: judge
+                metric: solved_count
+              groups:
+                - key: codeforces
+                  label: Codeforces
+                  points:
+                    - bucket_start: '2024-05-05T16:00:00.000Z'
+                      bucket_end: '2024-05-06T16:00:00.000Z'
+                      value: 37
+                      sample_size: 12
+                      label: 05-06
+                  series_summary:
+                    total: 512
+                    average: 5.68
+                    max: 41
+                    min: 0
+                    last: 37
+              generated_at: '2024-05-06T07:00:00.000Z'
+              stale: false
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT1H
+    x-cacheable: true
+
+statsHeatmap:
+  get:
+    tags:
+      - stats
+    operationId: getStatsHeatmap
+    summary: 训练热力图，按日聚合
+    description: |
+      **权限**：公开读。匿名可读仅当 `capabilities.public_read=true`；否则需要认证并持有
+      `stats:read`（或 `stats:*`、`*`）。
+
+      **语义**：返回按日聚合的热力图。`unit` 决定每日取值口径（提交数/通过数/是否活跃），
+      提交时刻按查询的 `timezone` **归日**，跨时区边界不会被重复或漏计。
+      `level`（0..4）不是原始值，而是由 `summary.level_thresholds` 的四个分位阈值计算出的
+      展示等级：`value < t1 → 1`，`t1 ≤ value < t2 → 2`，依此类推；`value=0` 为 `0`。
+      阈值随样本变化，客户端必须使用响应中的 `level_thresholds` 而不是硬编码。
+
+      **窗口**：`from`/`to` 默认最近 365 天，最多可查 730 天，超出返回 `422`。
+      响应 `days` 覆盖窗口内每一天，含无数据的天，`value=0`，与请求窗口的日历日一一对应。
+
+      **时序**：本端点读取**物化聚合**，返回值可能落后于采集写入：`generated_at` 是物化
+      完成时刻，`stale=true` 表示已超过 `PT1H` 新鲜度上界，应等待下一次周期性物化
+      重建后再读。`query` 回显解析后的窗口、时区与默认值。
+    security:
+      - {}
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: unit
+        in: query
+        required: false
+        description: |
+          每日取值口径，默认 `submissions`：`submissions` 提交数、`accepted` 通过数、
+          `active_days` 当日是否活跃（0/1）。
+        schema:
+          $ref: ../components/schemas/boards.yaml#/components/schemas/HeatmapUnit
+        example: submissions
+      - name: scope
+        in: query
+        required: false
+        description: 聚合口径，默认 `individual`；`team` 时按队伍聚合。
+        schema:
+          $ref: ../components/schemas/boards.yaml#/components/schemas/ScoreboardScope
+        example: individual
+      - name: principal_id
+        in: query
+        required: false
+        description: 只统计该主体；与 `handle` 互斥，同时给出返回 `422`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: handle
+        in: query
+        required: false
+        description: 只统计该 OJ 账号（须已绑定）；与 `principal_id` 互斥。
+        schema:
+          type: string
+          maxLength: 64
+        example: alice
+      - name: judges
+        in: query
+        required: false
+        description: 平台过滤，可重复传参；省略表示全部已启用平台。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/common.yaml#/components/schemas/Judge
+        example:
+          - codeforces
+      - name: team_ids
+        in: query
+        required: false
+        description: 队伍过滤，可重复传参。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example:
+          - team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: enrollment_years
+        in: query
+        required: false
+        description: 入学年份过滤，可重复传参。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: integer
+            minimum: 1990
+            maximum: 2100
+        example:
+          - 2022
+      - name: labels
+        in: query
+        required: false
+        description: 标签过滤，可重复传参；命中任一标签即纳入。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/Label
+        example:
+          - member
+      - name: clubs
+        in: query
+        required: false
+        description: |
+          社团过滤：只统计属于这些社团之一的成员，可重复传参，命中任一即纳入。
+          两个社团的名单不同，看"某个社团的训练情况"时用它。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/ClubCode
+          minItems: 1
+          maxItems: 2
+        example:
+          - acm_icpc
+      - name: from
+        in: query
+        required: false
+        description: 窗口起点，含；默认 `to - 365 天`，与 `to` 的距离不得超过 730 天。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2023-05-07T00:00:00.000Z'
+      - name: to
+        in: query
+        required: false
+        description: 窗口终点，不含；默认取当前时刻。必须晚于 `from`，否则 `422`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-05-06T00:00:00.000Z'
+      - name: timezone
+        in: query
+        required: false
+        description: |
+          归日使用的 IANA 时区，默认 `Asia/Shanghai`。跨时区边界的一天按该时区的
+          00:00–24:00 归并，响应中的 `date` 即该时区下的日历日。
+        schema:
+          type: string
+          default: Asia/Shanghai
+        example: Asia/Shanghai
+    responses:
+      '200':
+        description: 热力图，含每日取值、等级、阈值与物化新鲜度。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/boards.yaml#/components/schemas/StatsHeatmapResponse
+            example:
+              query:
+                scope: individual
+                unit: submissions
+                timezone: Asia/Shanghai
+                from: '2023-05-07T00:00:00.000Z'
+                to: '2024-05-06T00:00:00.000Z'
+              timezone: Asia/Shanghai
+              unit: submissions
+              days:
+                - date: '2024-05-05'
+                  value: 0
+                  level: 0
+                  submissions: 0
+                  accepted: 0
+                - date: '2024-05-06'
+                  value: 12
+                  level: 3
+                  submissions: 12
+                  accepted: 7
+              summary:
+                total: 4210
+                max_day_value: 48
+                active_days: 297
+                longest_streak: 46
+                current_streak: 3
+                first_date: '2023-05-08'
+                last_date: '2024-05-06'
+                level_thresholds:
+                  - 3
+                  - 9
+                  - 20
+                  - 35
+              generated_at: '2024-05-06T07:00:00.000Z'
+              stale: false
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT1H
+    x-cacheable: true
+
+statsHistogram:
+  get:
+    tags:
+      - stats
+    operationId: getStatsHistogram
+    summary: 指标分布直方图
+    description: |
+      **权限**：公开读。匿名可读仅当 `capabilities.public_read=true`；否则需要认证并持有
+      `stats:read`（或 `stats:*`、`*`）。
+
+      **语义**：按 `bins` 个**等宽箱**统计 `metric` 的分布，并给出同一批样本的
+      `stats`（count/min/max/mean/median/p90/p99/stddev）。分箱规则：区间为
+      `[lower, upper)`，**最后一箱右闭** `[lower, upper]`，以保证最大值被计入；
+      `ratio` 为该箱占比（0..1）。`bins` 默认 10，允许 1..50。
+
+      **`from`/`to` 的含义随 `metric` 变化**：
+      - 快照类指标 `rating`、`max_rating`、`solved_count`：统计**当前**全量样本的分布，
+        `from`/`to` 只用于限定样本的采集时间范围，可省略。
+      - 滚动类指标 `submissions_30d`、`active_days_30d`：是"截至 `now` 的滚动 30 天"
+        快照，**不受 `from`/`to` 影响**，给出时会被忽略（`query` 回显中为 `null`）。
+      - 区间类指标 `acceptance_rate`、`rating_delta`：按 `[from, to)` 区间计算，
+        `from` 默认 `to - 90 天`，`to` 默认当前时刻。
+
+      **时序**：本端点读取**物化聚合**，返回值可能落后于采集写入：`generated_at` 是物化
+      完成时刻，`stale=true` 表示已超过 `PT1H` 新鲜度上界，应等待下一次周期性物化
+      重建后再读。样本为 0 时返回 `bins: []`、`stats.count: 0`，不是错误。
+    security:
+      - {}
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: metric
+        in: query
+        required: true
+        description: |
+          分布指标。`solved_count` 累计解题数、`rating` 当前 rating、`max_rating` 历史最高
+          rating、`submissions_30d` 与 `active_days_30d` 为滚动 30 天快照、
+          `acceptance_rate` 通过率（0..1）、`rating_delta` 区间内 rating 变化量。
+        schema:
+          $ref: ../components/schemas/boards.yaml#/components/schemas/HistogramMetric
+        example: solved_count
+      - name: bins
+        in: query
+        required: false
+        description: 等宽箱数量，默认 10，允许 1..50；超出范围返回 `422`。
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+        example: 10
+      - name: scope
+        in: query
+        required: false
+        description: 聚合口径，默认 `individual`；`team` 时按队伍聚合。
+        schema:
+          $ref: ../components/schemas/boards.yaml#/components/schemas/ScoreboardScope
+        example: individual
+      - name: principal_id
+        in: query
+        required: false
+        description: 只统计该主体；与 `handle` 互斥，同时给出返回 `422`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: handle
+        in: query
+        required: false
+        description: 只统计该 OJ 账号（须已绑定）；与 `principal_id` 互斥。
+        schema:
+          type: string
+          maxLength: 64
+        example: alice
+      - name: judges
+        in: query
+        required: false
+        description: 平台过滤，可重复传参；省略表示全部已启用平台。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/common.yaml#/components/schemas/Judge
+        example:
+          - codeforces
+      - name: team_ids
+        in: query
+        required: false
+        description: 队伍过滤，可重复传参。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example:
+          - team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: enrollment_years
+        in: query
+        required: false
+        description: 入学年份过滤，可重复传参。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: integer
+            minimum: 1990
+            maximum: 2100
+        example:
+          - 2022
+      - name: labels
+        in: query
+        required: false
+        description: 标签过滤，可重复传参；命中任一标签即纳入。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/Label
+        example:
+          - member
+      - name: clubs
+        in: query
+        required: false
+        description: |
+          社团过滤：只统计属于这些社团之一的成员，可重复传参，命中任一即纳入。
+          两个社团的名单不同，看"某个社团的训练情况"时用它。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/identity.yaml#/components/schemas/ClubCode
+          minItems: 1
+          maxItems: 2
+        example:
+          - acm_icpc
+      - name: from
+        in: query
+        required: false
+        description: |
+          窗口起点，含。对 `acceptance_rate`/`rating_delta` 默认 `to - 90 天`；
+          对 `submissions_30d`/`active_days_30d` 及快照类指标无意义，给出即被忽略。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-02-06T00:00:00.000Z'
+      - name: to
+        in: query
+        required: false
+        description: |
+          窗口终点，不含，默认当前时刻。对 `submissions_30d`/`active_days_30d` 及
+          快照类指标无意义，给出即被忽略（`query` 回显为 `null`）。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-05-06T00:00:00.000Z'
+      - name: timezone
+        in: query
+        required: false
+        description: |
+          计算 `active_days_30d` 等按日指标时使用的 IANA 时区，默认 `Asia/Shanghai`；
+          纯数值指标不受影响。
+        schema:
+          type: string
+          default: Asia/Shanghai
+        example: Asia/Shanghai
+    responses:
+      '200':
+        description: 直方图分箱与分布统计量，含物化新鲜度。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/boards.yaml#/components/schemas/StatsHistogramResponse
+            example:
+              query:
+                scope: individual
+                metric: solved_count
+                timezone: Asia/Shanghai
+              metric: solved_count
+              bins:
+                - lower: 0
+                  upper: 100
+                  count: 23
+                  ratio: 0.168
+                  label: 0–100
+                - lower: 100
+                  upper: 200
+                  count: 31
+                  ratio: 0.226
+                  label: 100–200
+              stats:
+                count: 137
+                min: 3
+                max: 2841
+                mean: 412.6
+                median: 233
+                p90: 1102
+                p99: 2604
+                stddev: 401.2
+              generated_at: '2024-05-06T07:00:00.000Z'
+              stale: false
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT1H
+    x-cacheable: true
+
+statsSummary:
+  get:
+    tags:
+      - stats
+    operationId: getStatsSummary
+    summary: 面板总览统计
+    description: |
+      **权限**：公开读。匿名可读仅当 `capabilities.public_read=true`；否则需要认证并持有
+      `stats:read`（或 `stats:*`、`*`）。
+
+      **语义**：返回面板首页使用的四组汇总：`members`（成员规模与活跃度分档）、
+      `oj`（绑定账号与采集覆盖）、`ratings`（分平台 rating 分布）、`teams`（队伍数量）。
+      `season` 可限定学年，例如 `2024-2025`，省略表示全部历史；`team_id` 可把成员相关
+      统计收窄到单个队伍；`timezone` 用于活跃度按日归并，默认 `Asia/Shanghai`。
+
+      **时序**：本端点读取**物化聚合**，返回值可能落后于采集写入：`generated_at` 是物化
+      完成时刻，`stale=true` 表示已超过 `PT1H` 新鲜度上界，应等待下一次周期性物化
+      重建后再读；客户端应展示 `stale` 而不是把旧值当作实时值。
+    security:
+      - {}
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: timezone
+        in: query
+        required: false
+        description: 活跃度按日归并使用的 IANA 时区，默认 `Asia/Shanghai`。
+        schema:
+          type: string
+          default: Asia/Shanghai
+        example: Asia/Shanghai
+      - name: season
+        in: query
+        required: false
+        description: 学年标识，如 `2024-2025`；省略表示全部历史。格式非法返回 `422`。
+        schema:
+          type:
+            - string
+            - 'null'
+          pattern: '^[0-9]{4}-[0-9]{4}$'
+        example: 2024-2025
+      - name: team_id
+        in: query
+        required: false
+        description: 只统计该队伍的成员相关指标；省略表示全部成员。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+    responses:
+      '200':
+        description: 总览统计，含物化时刻与新鲜度。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/boards.yaml#/components/schemas/StatsSummaryResponse
+            example:
+              generated_at: '2024-05-06T07:00:00.000Z'
+              stale: false
+              members:
+                by_club:
+                  - club: acm_icpc
+                    total: 74
+                    active_30d: 41
+                    dormant_90d: 12
+                    inactive_365d: 6
+                  - club: safewind_software
+                    total: 88
+                    active_30d: 29
+                    dormant_90d: 15
+                    inactive_365d: 11
+                total: 138
+                active_30d: 64
+                dormant_90d: 21
+                inactive_365d: 9
+              oj:
+                linked_handles: 226
+                solved_total: 58214
+                submissions_30d: 3120
+                active_handles_30d: 118
+              ratings:
+                judges:
+                  - judge: codeforces
+                    max: 2410
+                    avg: 1432.7
+                    count: 96
+                  - judge: atcoder
+                    max: 2102
+                    avg: 1188.4
+                    count: 74
+              teams:
+                total: 18
+                active: 11
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT1H
+    x-cacheable: true

@@ -1,0 +1,29 @@
+{
+  "name": "dmu-xcpc-dashboard-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenAPI contract and TypeScript client for the DMU/ICPC training dashboard server",
+  "workspaces": [
+    "client"
+  ],
+  "scripts": {
+    "api:lint": "redocly lint doc/api/openapi.yaml",
+    "api:bundle": "redocly bundle doc/api/openapi.yaml -o build/openapi.bundled.yaml",
+    "api:bundle:json": "redocly bundle doc/api/openapi.yaml -o build/openapi.bundled.json",
+    "api:build": "npm run api:lint && npm run api:bundle && npm run api:bundle:json",
+    "api:docs": "redocly build-docs doc/api/openapi.yaml -o build/docs.html",
+    "fixtures": "npm run api:build && node scripts/generate-fixtures.mjs",
+    "types": "npm run api:build && node scripts/generate-types.mjs",
+    "build": "npm run build -w @dmu/xcpc-api-client",
+    "typecheck": "npm run typecheck -w @dmu/xcpc-api-client",
+    "test": "npm run api:build && npm run test -w @dmu/xcpc-api-client",
+    "verify": "npm run api:build && npm run typecheck && npm run test -w @dmu/xcpc-api-client"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@redocly/cli": "^2.57.0",
+    "typescript": "^5.9.3"
+  }
+}

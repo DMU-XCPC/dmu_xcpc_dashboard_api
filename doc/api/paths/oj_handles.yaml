@@ -1,0 +1,465 @@
+ojHandles:
+  get:
+    tags:
+      - oj-handles
+    operationId: listOjHandles
+    summary: 分页查询 OJ 绑定
+    description: |
+      返回成员与外部 OJ 账号的绑定列表，即 `OjHandle`，并附带采集得到的最近活跃信息。
+
+      **权限**：需要 `oj:read`；缺少返回 `403 insufficient_scope`。
+
+      **可见性与敏感字段**：列表按可见性规则裁剪 `verification_token`——只有「绑定归属
+      主体本人」或「持有 `oj:manage`」的调用者能看到 token 原值，其余调用者拿到的
+      `verification_token` 一律为 `null`。字段存在但值为 `null`，不是缺省。`handle`、
+      `profile_url`、`verified` 与采集统计对 `oj:read` 一律可见。
+
+      **过滤语义**：`principal_id` 只返回该主体的绑定；`judge` 按平台过滤；`verified`
+      按归属校验结果过滤；`false` 含 `verification_state` 为 `pending` 的绑定；
+      `q` 对 `handle` 做大小写不敏感的子串匹配；`updated_since` 按绑定的最近变更时刻
+      ——绑定、解绑与归属校验状态变化都等价于 `revision` 递增——做增量过滤，
+      **不**包含采集快照字段 `last_crawled_at`、`last_submission_at`、`summary` 的更新。
+
+      **排序与分页**：`sort` 默认 `judge`，`order` 默认 `asc`；相同时以 `id` 稳定排序，
+      翻页不重复、不跳过。`page` 越界返回空 `items`，不返回 `404`。
+
+      **时序**：绑定关系与归属校验状态为强一致——响应包含本次请求前已提交的写入；
+      采集派生字段 `last_crawled_at`、`last_submission_at`、`summary` 反映最近一次
+      **已完成**的采集，可能落后于采集通道中在途的写入，客户端不应把它当作实时值。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: principal_id
+        in: query
+        required: false
+        description: 只返回指定主体，前缀 `acc_`的 OJ 绑定。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: judge
+        in: query
+        required: false
+        description: 只返回指定评测平台的绑定。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Judge
+        example: codeforces
+      - name: verified
+        in: query
+        required: false
+        description: |
+          归属校验过滤：`true` 只返回已确认归属（`verified: true`）的绑定；
+          `false` 只返回尚未确认（`verification_state: pending`）的绑定。省略时不过滤。
+        schema:
+          type: boolean
+        example: true
+      - name: q
+        in: query
+        required: false
+        description: 对 `handle` 做大小写不敏感的子串模糊匹配。
+        schema:
+          type: string
+          maxLength: 64
+        example: alice
+      - $ref: ../components/parameters/common.yaml#/components/parameters/UpdatedSince
+      - name: sort
+        in: query
+        required: false
+        description: 排序键，默认 `judge`。
+        schema:
+          type: string
+          enum:
+            - judge
+            - handle
+            - linked_at
+            - last_submission_at
+            - updated_at
+          default: judge
+        example: judge
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Order
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Page
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Size
+    responses:
+      '200':
+        description: OJ 绑定列表（分页）。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/accounts.yaml#/components/schemas/PagedOjHandle
+            example:
+              page: 1
+              size: 20
+              total: 3
+              has_next: false
+              items:
+                - id: ojh_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  judge: codeforces
+                  judge_label: null
+                  handle: alice_cf
+                  profile_url: https://codeforces.com/profile/alice_cf
+                  verified: true
+                  verification_state: verified
+                  verification_token: null
+                  verified_at: '2024-02-01T10:00:00.000Z'
+                  linked_at: '2024-01-31T09:00:00.000Z'
+                  last_crawled_at: '2024-05-06T06:00:00.000Z'
+                  last_submission_at: '2024-05-05T20:11:03.000Z'
+                  summary:
+                    rating: 1680
+                    max_rating: 1720
+                    rating_delta_30d: 12
+                    solved_count: 456
+                    attempted_count: 512
+                    submissions_30d: 33
+                    active_days_30d: 11
+                    computed_at: '2024-05-06T06:00:05.000Z'
+                  revision: '17'
+                  updated_at: '2024-05-06T06:00:05.000Z'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+
+  post:
+    tags:
+      - oj-handles
+    operationId: linkOjHandle
+    summary: 绑定 OJ 账号并发起归属校验
+    description: |
+      把一个外部 OJ 账号绑定到主体，并进入归属校验流程。
+
+      **权限**：给**自己**绑定需要 `oj:write`；给**他人**绑定（显式给出 `principal_id`）
+      需要 `oj:manage`。二者都不满足返回 `403 insufficient_scope`；`principal_id` 不存在
+      返回 `404 not_found`。
+
+      **冲突与平台限制**：同一 `judge` 下 `handle` 全局唯一，已被他人（或自己）绑定时返回
+      `409 handle_already_linked`，`detail` 指出当前持有者；已解绑的 handle 可以重新绑定。
+      服务器未启用的平台返回 `422 judge_not_supported`；`judge: other` 未给 `judge_label`
+      返回 `422 validation_failed`。
+
+      **副作用**：绑定成功返回 `201`，`Location` 指向
+      `GET /oj-handles/{handle_id}`，新绑定 `verification_state: pending`、`verified: false`，
+      并在响应中返回**归属校验 token**（`verification_token`）。该 token 属敏感字段：
+      仅「本人」或「持有 `oj:manage`」的调用者可见，其他主体在各读端点看到的该字段恒为
+      `null`。用户需要把该 token 放到 OJ 主页简介/签名中，采集器随后调用
+      `POST /oj-handles/{handle_id}/verify` 确认归属；未确认前采集数据会计入该 handle，
+      但不会计入主体统计。
+
+      **幂等性**：必须携带 `Idempotency-Key`。同键重放返回首次的 `201` 与**同一个**
+      `verification_token`，不会重复绑定；键相同但请求体不同返回
+      `409 idempotency_key_reused`。
+
+      **并发**：以 `(judge, handle)` 的唯一约束做最终仲裁，并发绑定同一 handle 时只有
+      一个成功，其余返回 `409 handle_already_linked`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      description: 绑定定义；`judge` 与 `handle` 必填。
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/accounts.yaml#/components/schemas/LinkOjHandleRequest
+          example:
+            judge: codeforces
+            handle: alice_cf
+    responses:
+      '201':
+        description: 绑定成功，返回待校验的绑定与一次性可见的 `verification_token`。
+        headers:
+          Location:
+            $ref: ../components/headers/common.yaml#/components/headers/Location
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/OjHandle
+            example:
+              id: ojh_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              judge: codeforces
+              judge_label: null
+              handle: alice_cf
+              profile_url: https://codeforces.com/profile/alice_cf
+              verified: false
+              verification_state: pending
+              verification_token: xcv_7f3aQ0K3M7N9P2R4T6W8X0
+              verified_at: null
+              linked_at: '2024-05-06T08:00:00.000Z'
+              last_crawled_at: null
+              last_submission_at: null
+              summary: null
+              revision: '1'
+              updated_at: '2024-05-06T08:00:00.000Z'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+ojHandle:
+  get:
+    tags:
+      - oj-handles
+    operationId: getOjHandle
+    summary: 获取单个 OJ 绑定
+    description: |
+      返回单个 OJ 绑定的详情，包含归属校验状态与最近采集信息。
+
+      **权限**：需要 `oj:read`。
+
+      **敏感字段裁剪**：`verification_token` 只对「绑定归属主体本人」或「持有
+      `oj:manage`」的调用者返回原值；**其余调用者该字段必须为 `null`**（字段存在且为
+      `null`，避免用字段存在性推断校验状态）。`verified`、`verification_state` 与
+      `handle` 对 `oj:read` 一律可见。
+
+      **缓存与并发**：响应带强 `ETag`（等于该绑定的 `revision`）。`If-None-Match` 命中
+      返回 `304 Not Modified`（无响应体）。绑定不存在**或**对调用者不可见统一返回
+      `404 not_found`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: handle_id
+        in: path
+        required: true
+        description: 目标 OJ 绑定的 id，前缀 `ojh_`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: OJ 绑定详情（`verification_token` 视调用者身份可为 `null`）。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/OjHandle
+            example:
+              id: ojh_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              judge: codeforces
+              judge_label: null
+              handle: alice_cf
+              profile_url: https://codeforces.com/profile/alice_cf
+              verified: true
+              verification_state: verified
+              verification_token: null
+              verified_at: '2024-02-01T10:00:00.000Z'
+              linked_at: '2024-01-31T09:00:00.000Z'
+              last_crawled_at: '2024-05-06T06:00:00.000Z'
+              last_submission_at: '2024-05-05T20:11:03.000Z'
+              summary:
+                rating: 1680
+                max_rating: 1720
+                rating_delta_30d: 12
+                solved_count: 456
+                attempted_count: 512
+                submissions_30d: 33
+                active_days_30d: 11
+                computed_at: '2024-05-06T06:00:05.000Z'
+              revision: '17'
+              updated_at: '2024-05-06T06:00:05.000Z'
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+
+  delete:
+    tags:
+      - oj-handles
+    operationId: unlinkOjHandle
+    summary: 解绑 OJ 账号
+    description: |
+      解除主体与某个 OJ 账号的绑定关系。
+
+      **权限**：绑定归属主体本人需要 `oj:write`；任何持有 `oj:manage` 的主体也可解绑他人
+      的绑定。不满足返回 `403 insufficient_scope`；绑定不存在**或**不可见返回
+      `404 not_found`。
+
+      **副作用与数据保留**：只删除「绑定关系」，**历史采集数据全部保留**——该 handle 的
+      提交记录、rating 变化与统计在公开查询端点（`oj-data` 系列）中仍然可见，只是不再
+      关联到任何主体，也不再计入该主体的统计；归属校验 token 同时作废。
+      解绑后同一 `(judge, handle)` 可被任意主体重新绑定。
+
+      **幂等性**：总是返回 `204`——重复解绑、解绑不存在的绑定（在可见范围内）同样返回
+      `204`。必须携带 `Idempotency-Key`，同键重放返回首次结果并带
+      `Idempotency-Replayed: true`。
+
+      **并发与可撤销性**：与 `POST /oj-handles/{handle_id}/verify` 竞争时以最后一次提交
+      为准；本操作可通过重新绑定恢复，但**不会**恢复原绑定 id 与已作废的校验 token。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: handle_id
+        in: path
+        required: true
+        description: 目标 OJ 绑定的 id，前缀 `ojh_`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    responses:
+      '204':
+        $ref: ../components/responses/common.yaml#/components/responses/NoContent
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+ojHandleVerify:
+  post:
+    tags:
+      - oj-handles
+    operationId: verifyOjHandle
+    summary: 确认 OJ 账号归属，由采集器调用
+    description: |
+      采集器在 OJ 主页/签名中读到绑定创建时下发的 `verification_token` 后，用本端点确认
+      归属。**本端点由采集器调用，不是用户自助端点。**
+
+      **权限**：需要 `ingest:write` 或 `crawler:manage`；不足返回
+      `403 insufficient_scope`。绑定不存在返回 `404 not_found`。
+
+      **校验语义**：请求体 `token` 必须与绑定的 `verification_token` 完全一致；
+      不匹配，含已解绑导致 token 作废返回 `422 validation_failed`，且响应体的
+      `errors[].pointer` 为 `/token`。`evidence_url` 可选，仅写入审计日志。
+
+      **成功副作用**：绑定置为 `verified: true`、`verification_state: verified`，
+      `verified_at` 落库为服务端当前时刻；此后该 handle 的采集数据计入主体统计。
+      `verification_token` 在校验成功后立即作废（响应中不再返回可复用的 token）。
+
+      **幂等性**：对已 `verified` 的绑定重复调用返回 `200` 且**状态不变**
+      （`verified_at` 保持首次确认时刻），不产生新的副作用或审计噪声。
+      必须携带 `Idempotency-Key`，同键重放返回首次的 200。
+
+      **时序**：强一致——返回时 `verified` 已落库，可在随后的读请求中立即观察到。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: handle_id
+        in: path
+        required: true
+        description: 目标 OJ 绑定的 id，前缀 `ojh_`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    requestBody:
+      required: true
+      description: 归属校验请求体；`token` 必填。
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/accounts.yaml#/components/schemas/VerifyOjHandleRequest
+          example:
+            token: xcv_7f3aQ0K3M7N9P2R4T6W8X0
+            evidence_url: https://codeforces.com/profile/alice_cf
+    responses:
+      '200':
+        description: 归属已确认（或此前已确认）的绑定；重复调用状态不变。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Idempotency-Replayed:
+            $ref: ../components/headers/common.yaml#/components/headers/IdempotencyReplayed
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/OjHandle
+            example:
+              id: ojh_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              judge: codeforces
+              judge_label: null
+              handle: alice_cf
+              profile_url: https://codeforces.com/profile/alice_cf
+              verified: true
+              verification_state: verified
+              verification_token: null
+              verified_at: '2024-05-06T08:10:00.000Z'
+              linked_at: '2024-05-06T08:00:00.000Z'
+              last_crawled_at: '2024-05-06T08:05:00.000Z'
+              last_submission_at: '2024-05-06T08:04:12.000Z'
+              summary:
+                rating: 1512
+                max_rating: 1512
+                rating_delta_30d: 0
+                solved_count: 17
+                attempted_count: 21
+                submissions_30d: 42
+                active_days_30d: 3
+                computed_at: '2024-05-06T08:05:03.000Z'
+              revision: '3'
+              updated_at: '2024-05-06T08:00:00.000Z'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '415':
+        $ref: ../components/responses/common.yaml#/components/responses/UnsupportedMediaType
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong

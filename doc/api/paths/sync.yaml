@@ -1,0 +1,136 @@
+syncChanges:
+  get:
+    tags:
+      - sync
+    operationId: listResourceChanges
+    summary: 拉取增量变更流
+    description: |
+      需要 `sync:read`（认证必填，**不提供匿名访问**：变更流覆盖成员、
+      队伍等含 PII 的资源，匿名读取会泄漏资源存在性与变更节奏）。
+      供二次开发与离线缓存按游标增量同步本地数据库。
+
+      **建立基线（首次握手）**：`since` 可省略。省略时服务端**不返回历史变更**，
+      而是返回空 `changes` 与**当前游标** `cursor`，以及 `server_time`
+      与 `retention`。客户端保存该游标，再对关心的资源做一次全量拉取，
+      之后用保存的游标调用本接口即可只取增量。这是推荐的"建立基线"握手。
+
+      **续拉**：把上次响应的 `cursor` 原样作为 `since` 回传即可。`cursor` 与
+      `changes` 中**最后一条**变更对应。`has_more` 为 `true` 时应立即用新的
+      `cursor` 继续请求，直到 `has_more=false`。
+      **重放**：同一 `cursor` 重放是幂等的——既不跳过、也不重复已确认返回的变更，
+      因此网络失败后可以安全重试。
+
+      **过滤**：`resources` 可重复出现，只返回指定资源集合的变更，默认全部，
+      取值见 `SyncResource`；`until` 用于可重复的历史追赶，
+      只返回 `updated_at ≤ until` 的变更（便于把同一时间窗口重放两次做校验）。
+
+      **删除**：`op: delete` 表示该 id 已在服务端删除，客户端应删除本地副本；
+      删除事件同样占用 `revision` 与保留期。
+
+      **游标过期**：游标早于 `retention` 保留窗口时返回 `410 Gone`
+      （`code: cursor_expired`）；客户端必须重新基线化——省略 `since` 重新握手，
+      并对相关资源做一次全量拉取后继续增量。
+
+      **时序**：变更为 `eventual` 视图：已提交的写入在最多
+      `x-freshness-bound`，默认 `PT1M`内出现在变更流中。
+      `server_time` 用于计算客户端时钟偏移，从而正确使用 `since`/`updated_since`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: since
+        in: query
+        required: false
+        description: |
+          上一次响应返回的 `cursor`（不透明字符串，原样回传）。
+          **省略时**返回当前游标与空 `changes`，用于建立基线，见接口说明。
+          格式非法（非本服务签发、被篡改）返回 `422 validation_failed`；
+          格式合法但早于保留期返回 `410 cursor_expired`。
+        schema:
+          type: string
+          maxLength: 512
+        example: eyJ0IjoiMjAyNC0wNS0wNlQwNzowODoxMC4wMDBaIiwiaWQiOiJ0ZWFtXzAxSjhaNVY2UTBLM003TjlQMlI0VDZXOFgwIn0
+      - name: resources
+        in: query
+        required: false
+        description: |
+          资源集合过滤，可重复出现，例如 `?resources=members&resources=teams`。
+          省略时返回全部资源集合的变更。
+        style: form
+        explode: true
+        schema:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: ../components/schemas/sync.yaml#/components/schemas/SyncResource
+        example:
+          - members
+          - teams
+      - name: limit
+        in: query
+        required: false
+        description: 单页返回的变更条数上限；超过上限时取上限而不报错。
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 200
+        example: 200
+      - name: until
+        in: query
+        required: false
+        description: |
+          只返回 `updated_at` **不晚于**该时刻的变更，用于可重复的历史追赶；
+          `until` 早于所持游标对应时刻时返回空 `changes`（不报错）。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-05-06T07:08:10.000Z'
+    responses:
+      '200':
+        description: 一段连续的增量变更流（`since` 省略时为基线握手）。
+        headers:
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+          X-RateLimit-Limit:
+            $ref: ../components/headers/common.yaml#/components/headers/RateLimitLimit
+          X-RateLimit-Remaining:
+            $ref: ../components/headers/common.yaml#/components/headers/RateLimitRemaining
+          X-RateLimit-Reset:
+            $ref: ../components/headers/common.yaml#/components/headers/RateLimitReset
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/sync.yaml#/components/schemas/ChangeFeed
+            example:
+              changes:
+                - resource: members
+                  id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  op: upsert
+                  revision: '17'
+                  updated_at: '2024-05-06T07:08:09.123Z'
+                - resource: teams
+                  id: team_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  op: delete
+                  revision: '4'
+                  updated_at: '2024-05-06T07:08:10.000Z'
+              cursor: eyJ0IjoiMjAyNC0wNS0wNlQwNzowODoxMC4wMDBaIiwiaWQiOiJ0ZWFtXzAxSjhaNVY2UTBLM003TjlQMlI0VDZXOFgwIn0
+              has_more: false
+              server_time: '2024-05-06T07:08:11.000Z'
+              retention: P30D
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '410':
+        $ref: ../components/responses/common.yaml#/components/responses/CursorExpired
+      '422':
+        $ref: ../components/responses/common.yaml#/components/responses/UnprocessableEntity
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT1M

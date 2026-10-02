@@ -1,0 +1,538 @@
+ojSubmissions:
+  get:
+    tags:
+      - oj-data
+    operationId: listOjSubmissions
+    summary: 查询 OJ 提交记录
+    description: |
+      公开查询采集到的 OJ 提交记录。这是**采集结果的最终一致视图**
+      ，`x-consistency: eventual`，最大滞后见 `x-freshness-bound`。刚通过
+      `POST /ingest/oj/submissions` 写入的数据可能尚未出现在结果里。
+
+      **可见性**：`security` 允许匿名、`bearerAuth` 与 `apiKeyAuth` 三种方式。
+      匿名调用仅在 `GET /meta` 的 `capabilities.public_read = true` 时被接受；
+      若服务器关闭了公开读取，则必须携带持有 `oj:read` 的凭证，
+      否则返回错误：未带凭证为 `401 unauthenticated`，scope 不足为 `403 insufficient_scope`。
+
+      **数据范围**：本端点只暴露**公开的 OJ 数据**，即外部平台本来就公开的提交、题目、
+      rating 与账号名），**不含手机号、学号、邮箱等 PII**；`principal_id` 仅是内部主体标识，
+      用于与成员关联，不携带任何个人档案字段。
+
+      **排序与游标**：结果**固定按 `submitted_at` 倒序**，同一时刻按 `id` 倒序作为决胜键。
+      游标与排序键绑定：`cursor` 只能来自本端点上一次响应，不能跨过滤条件复用；
+      服务端保证在数据持续增长期间不跳过、不重复已返回的条目。
+
+      **过滤**：`judge`、`handle`、`principal_id`、`problem_external_id`、`contest_id`、
+      `verdict`，可重复，取并集、`from` / `to`，按 `submitted_at` 的半开区间 `[from, to)`。
+      时间或枚举格式错误返回 `400 bad_request`；`cursor` 已过期返回 `410 cursor_expired`
+      ，重新从第一页开始即可。
+    security:
+      - {}
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Cursor
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Limit
+      - name: judge
+        in: query
+        required: false
+        description: 只返回该平台的提交。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Judge
+        example: codeforces
+      - name: handle
+        in: query
+        required: false
+        description: 按 OJ 账号名精确过滤（大小写敏感，外部平台原始值）。
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 64
+        example: tourist
+      - name: principal_id
+        in: query
+        required: false
+        description: 只返回已绑定到该主体的提交；未绑定的提交不会命中任何 `principal_id`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: problem_external_id
+        in: query
+        required: false
+        description: 按外部平台的原始题目编号过滤（通常与 `judge` 一起使用）。
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+        example: 1873A
+      - name: contest_id
+        in: query
+        required: false
+        description: 按外部平台的原始比赛编号过滤；练习提交（不在比赛中）不会被命中。
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+        example: '1873'
+      - name: verdict
+        in: query
+        required: false
+        description: 按归一化评测结果过滤；可重复出现，多个取值之间是**并集**。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            $ref: ../components/schemas/oj_data.yaml#/components/schemas/OjVerdict
+        example:
+          - accepted
+          - wrong_answer
+      - name: from
+        in: query
+        required: false
+        description: 只返回 `submitted_at` **不早于**该时刻的提交，含边界。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-05-01T00:00:00.000Z'
+      - name: to
+        in: query
+        required: false
+        description: 只返回 `submitted_at` **早于**该时刻的提交，不含边界。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-06-01T00:00:00.000Z'
+    responses:
+      '200':
+        description: 提交记录的一页，按 `submitted_at` 倒序。
+        headers:
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/OjSubmissionPage
+            example:
+              has_more: true
+              next_cursor: eyJ0IjoiMjAyNC0wNS0wNlQwNjo1OToxMi4wMDBaIiwiaWQiOiJzdWJfMDFKOFo1VjZRMEszTTdOOVAyUjRUNlc4WDAifQ
+              items:
+                - id: sub_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  judge: codeforces
+                  submission_id: '223456789'
+                  handle: tourist
+                  principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  problem:
+                    judge: codeforces
+                    external_id: 1873A
+                    title: Short Sort
+                    url: https://codeforces.com/contest/1873/problem/A
+                    tags:
+                      - implementation
+                    difficulty: 800
+                    rating: 800
+                  verdict: accepted
+                  verdict_raw: OK
+                  language: GNU C++17
+                  submitted_at: '2024-05-06T06:59:12.000Z'
+                  ingested_at: '2024-05-06T07:01:00.000Z'
+                  contest: null
+                  is_first_ac: true
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '410':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+        description: |
+          游标失效（`410 cursor_expired`）：`cursor` 超出有效期或与当前过滤条件不匹配；
+            重新从第一页开始即可。
+          重新从第一页开始拉取即可。
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT5M
+    x-cacheable: true
+
+ojRatingHistory:
+  get:
+    tags:
+      - oj-data
+    operationId: listOjRatingHistory
+    summary: 查询 OJ rating 变化历史
+    description: |
+      公开查询采集到的 rating，含段位/分数变化历史，用于绘制成长曲线。
+      返回的是**采集结果的最终一致视图**，`x-consistency: eventual`，
+      最大滞后见 `x-freshness-bound`）。
+
+      **可见性**：`security` 允许匿名、`bearerAuth` 与 `apiKeyAuth`。匿名调用仅在
+      `GET /meta` 的 `capabilities.public_read = true` 时被接受；否则必须携带持有
+      `oj:read` 的凭证，缺少凭证返回 `401 unauthenticated`、scope 不足返回
+      `403 insufficient_scope`。
+
+      **数据范围**：只有公开 OJ 数据（账号名、比赛、rating 变化），
+      **不含手机号、学号等 PII**。
+
+      **排序与游标**：固定按 `at` 倒序（同一时刻按 `id` 倒序决胜），游标与排序键绑定，
+      `cursor` 只能来自本端点上一次响应；数据增长期间保证不跳过、不重复。
+
+      **过滤**：`judge`、`handle`、`principal_id`、`from` / `to`，按 `at` 的半开区间
+      `[from, to)`。参数无法解析返回 `400 bad_request`；游标失效返回 `410 cursor_expired`。
+    security:
+      - {}
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Cursor
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Limit
+      - name: judge
+        in: query
+        required: false
+        description: 只返回该平台的 rating 变化。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Judge
+        example: codeforces
+      - name: handle
+        in: query
+        required: false
+        description: 按 OJ 账号名精确过滤（大小写敏感，外部平台原始值）。
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 64
+        example: tourist
+      - name: principal_id
+        in: query
+        required: false
+        description: 只返回已绑定到该主体的 rating 变化记录。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: from
+        in: query
+        required: false
+        description: 只返回 `at` **不早于**该时刻的记录，含边界。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-01-01T00:00:00.000Z'
+      - name: to
+        in: query
+        required: false
+        description: 只返回 `at` **早于**该时刻的记录，不含边界。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Timestamp
+        example: '2024-06-01T00:00:00.000Z'
+    responses:
+      '200':
+        description: rating 变化记录的一页，按 `at` 倒序。
+        headers:
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/OjRatingHistoryPage
+            example:
+              has_more: false
+              next_cursor: null
+              items:
+                - id: rch_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  judge: codeforces
+                  handle: tourist
+                  principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  contest:
+                    judge: codeforces
+                    contest_id: '1873'
+                    name: Codeforces Round 898 (Div. 4)
+                    url: https://codeforces.com/contest/1873
+                    started_at: '2023-09-21T14:35:00.000Z'
+                  rating: 3721
+                  delta: 42
+                  max_rating: 3800
+                  rank: 7
+                  performance: 3810
+                  at: '2023-09-21T16:35:00.000Z'
+                  ingested_at: '2024-05-06T07:01:00.000Z'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '410':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+        description: |
+          游标失效（`410 cursor_expired`）：`cursor` 超出有效期或与当前过滤条件不匹配；
+            重新从第一页开始即可。
+          重新从第一页开始拉取即可。
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT5M
+    x-cacheable: true
+
+ojProblems:
+  get:
+    tags:
+      - oj-data
+    operationId: listOjProblems
+    summary: 查询 OJ 题目库
+    description: |
+      公开查询采集到的题目库，支持按标题模糊搜索、标签与难度/rating 区间筛选。
+      返回的是**采集结果的最终一致视图**，`x-consistency: eventual`，
+      最大滞后见 `x-freshness-bound`）。
+
+      **可见性**：`security` 允许匿名、`bearerAuth` 与 `apiKeyAuth`。匿名调用仅在
+      `GET /meta` 的 `capabilities.public_read = true` 时被接受；否则必须携带持有
+      `oj:read` 的凭证；未带凭证返回 `401`，scope 不足返回 `403`。
+
+      **数据范围**：只有公开 OJ 数据，即平台题目编号、标题、标签与难度，
+      **不含手机号、学号等 PII**。
+
+      **分页与缓存**：使用偏移分页 `page` / `size`，响应为 `PagedOjProblem`
+      ，`page` 越界返回空 `items` 而不是 `404`。题目元数据变化频率低，
+      本端点是 `x-cacheable: true` 的，客户端可安全缓存。
+      `updated_since` 只返回 `updated_at` **严格晚于**该时刻的题目，
+      与 `sort=updated_at` 组合做增量同步。
+
+      **过滤**：`judge`、`q` 对标题做大小写不敏感的模糊匹配、`tag`，可重复，取并集、
+      `min_difficulty` / `max_difficulty`、`min_rating` / `max_rating`，均为闭区间。
+      `sort` 为 `external_id` / `title` / `difficulty` / `rating` / `first_seen_at` /
+      `updated_at`，方向由 `order` 决定。参数无法解析或枚举未知返回 `400 bad_request`。
+    security:
+      - {}
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Page
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Size
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Order
+      - $ref: ../components/parameters/common.yaml#/components/parameters/UpdatedSince
+      - name: judge
+        in: query
+        required: false
+        description: 只返回该平台的题目。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Judge
+        example: codeforces
+      - name: q
+        in: query
+        required: false
+        description: 标题模糊搜索关键字（大小写不敏感的子串匹配）。
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 120
+        example: Short Sort
+      - name: tag
+        in: query
+        required: false
+        description: 按标签过滤；可重复出现，多个标签之间是**并集**。
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: string
+        example:
+          - implementation
+          - dp
+      - name: min_difficulty
+        in: query
+        required: false
+        description: 难度分值下界（闭区间）。
+        schema:
+          type: integer
+        example: 800
+      - name: max_difficulty
+        in: query
+        required: false
+        description: 难度分值上界（闭区间）。
+        schema:
+          type: integer
+        example: 1600
+      - name: min_rating
+        in: query
+        required: false
+        description: 难度 rating 下界（闭区间）。
+        schema:
+          type: integer
+        example: 800
+      - name: max_rating
+        in: query
+        required: false
+        description: 难度 rating 上界（闭区间）。
+        schema:
+          type: integer
+        example: 1600
+      - name: sort
+        in: query
+        required: false
+        description: 排序键；配合 `order` 使用，默认 `external_id` 升序。
+        schema:
+          type: string
+          enum:
+            - external_id
+            - title
+            - difficulty
+            - rating
+            - first_seen_at
+            - updated_at
+          default: external_id
+        example: difficulty
+    responses:
+      '200':
+        description: 题目库的一页。
+        headers:
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/PagedOjProblem
+            example:
+              page: 1
+              size: 20
+              total: 137
+              has_next: true
+              items:
+                - id: pbl_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  judge: codeforces
+                  external_id: 1873A
+                  title: Short Sort
+                  url: https://codeforces.com/contest/1873/problem/A
+                  tags:
+                    - implementation
+                  difficulty: 800
+                  rating: 800
+                  solved_count: 12
+                  attempt_count: 19
+                  first_seen_at: '2024-04-01T02:00:00.000Z'
+                  updated_at: '2024-05-06T07:00:00.000Z'
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT5M
+    x-cacheable: true
+
+ojHandleStats:
+  get:
+    tags:
+      - oj-data
+    operationId: getOjHandleStats
+    summary: 获取单个 OJ 绑定的统计详情
+    description: |
+      公开查询某个 OJ 绑定的统计详情：聚合摘要（rating、解题数、近 30 天活跃度）
+      加上指定时间窗内的最近提交样本与 rating 曲线点。数据是**采集结果的最终一致视图**
+      （`x-consistency: eventual`，最大滞后见 `x-freshness-bound`）。
+
+      **可见性**：`security` 允许匿名、`bearerAuth` 与 `apiKeyAuth`。匿名调用仅在
+      `GET /meta` 的 `capabilities.public_read = true` 时被接受；否则必须携带持有
+      `oj:read` 的凭证；未带凭证返回 `401`，scope 不足返回 `403`。
+
+      **数据范围**：只有公开 OJ 数据；**不含手机号、学号等 PII**。
+      注意 `OjHandle.verification_token` 之类的秘密字段不会出现在本响应中。
+
+      **时间窗**：`window` 为 ISO-8601 duration，默认 `P90D`，最大 `P1095D` = 3 年；
+      超过上限时按上限处理而不报错。`window` 越短返回的 `rating_points` 越密
+      （服务端可能对长窗口做降采样），`recent_submissions` 始终最多 20 条。
+
+      **错误分支**：`handle_id` 不是合法的 `Id` 或对应绑定不存在（已解绑、已删除）时返回
+      `404 not_found`；`window` 无法解析返回 `400 bad_request`。
+    security:
+      - {}
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: handle_id
+        in: path
+        required: true
+        description: OJ 绑定 id，前缀 `ojh_`。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: ojh_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: window
+        in: query
+        required: false
+        description: |
+          统计回看的时间窗（ISO-8601 duration），默认 `P90D`，最大 `P1095D`；
+          超过上限按上限处理。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Duration
+        example: P90D
+    responses:
+      '200':
+        description: 该绑定的统计详情。
+        headers:
+          X-Request-Id:
+            $ref: ../components/headers/common.yaml#/components/headers/RequestId
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/oj_data.yaml#/components/schemas/OjHandleStats
+            example:
+              handle_id: ojh_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              judge: codeforces
+              handle: tourist
+              window: P90D
+              rating: 3721
+              max_rating: 3800
+              rating_delta_30d: 42
+              solved_count: 1873
+              attempted_count: 2104
+              submissions_30d: 96
+              active_days_30d: 21
+              computed_at: '2024-05-06T07:00:05.000Z'
+              recent_submissions:
+                - id: sub_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  judge: codeforces
+                  submission_id: '223456789'
+                  handle: tourist
+                  principal_id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  problem:
+                    judge: codeforces
+                    external_id: 1873A
+                    title: Short Sort
+                  verdict: accepted
+                  verdict_raw: OK
+                  language: GNU C++17
+                  submitted_at: '2024-05-06T06:59:12.000Z'
+                  ingested_at: '2024-05-06T07:01:00.000Z'
+                  contest: null
+                  is_first_ac: true
+              rating_points:
+                - at: '2024-05-01T00:00:00.000Z'
+                  rating: 3679
+                - at: '2024-05-06T00:00:00.000Z'
+                  rating: 3721
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT15M
+    x-cacheable: true

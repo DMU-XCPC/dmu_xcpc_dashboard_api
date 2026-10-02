@@ -1,0 +1,480 @@
+health:
+  get:
+    tags:
+      - ops
+    operationId: getHealth
+    summary: 存活探针
+    description: |
+      **匿名可访问**（`security: [{}]`），供容器探针与负载均衡使用；无副作用、
+      可安全高频调用，客户端不应缓存结果。
+
+      **状态语义**：`status=ok|degraded` **都返回 `200`**——这样探针能区分
+      "活着但降级"（不应重启容器）与"已死"；只有 `status=down` 返回 `503`，
+      响应体复用共享 Problem（`code: service_unavailable`，`detail` 列出故障依赖）。
+      探针端点通常被部署方加入限流白名单；若未加白名单且触发全局限流，
+      返回 `429`，探针应按 `Retry-After` 退避重试。
+
+      **时序**：结果是即时/短缓存的聚合，不做历史留存；`uptime_seconds` 反映进程存活时长。
+    security: [{}]
+    responses:
+      '200':
+        description: 进程存活（`ok` 或 `degraded`）。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/ops.yaml#/components/schemas/HealthStatus
+            example:
+              status: ok
+              version: 1.4.2+9f1c2ab
+              uptime_seconds: 86400
+              time: '2024-05-06T07:08:09.123Z'
+              checks:
+                - name: database
+                  status: ok
+                  latency_ms: 3
+                  message: null
+                - name: cache
+                  status: ok
+                  latency_ms: 1
+                  message: null
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '503':
+        $ref: ../components/responses/common.yaml#/components/responses/ServiceUnavailable
+    x-idempotent: true
+    x-consistency: strong
+
+ready:
+  get:
+    tags:
+      - ops
+    operationId: getReady
+    summary: 就绪探针
+    description: |
+      **匿名可访问**（`security: [{}]`）。`ready=true` 时返回 `200 ReadyStatus`；
+      **`ready=false` 时返回 `503`**，响应体为 Problem（`code: service_unavailable`），
+      `detail` 列出未就绪的依赖名称，供探针在滚动发布/依赖恢复前把实例摘除。
+
+      与 `/health` 的区别：`/health` 回答"进程是否活着"，`/ready` 回答
+      "现在能否接收流量"。依赖短暂不可用只影响本端点，不应触发容器重启。
+
+      **时序**：依赖恢复后 `ready` 在数秒内变为 `true`（无缓存保证）。
+    security: [{}]
+    responses:
+      '200':
+        description: 已就绪，可以接收流量。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/ops.yaml#/components/schemas/ReadyStatus
+            example:
+              ready: true
+              checks:
+                - name: database
+                  status: ok
+                  latency_ms: 3
+                  message: null
+                - name: cache
+                  status: ok
+                  latency_ms: 1
+                  message: null
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '503':
+        $ref: ../components/responses/common.yaml#/components/responses/ServiceUnavailable
+    x-idempotent: true
+    x-consistency: strong
+
+meta:
+  get:
+    tags:
+      - ops
+    operationId: getMeta
+    summary: 服务器元信息与时钟校准
+    description: |
+      **匿名可访问**（`security: [{}]`）。返回契约版本、服务端构建号、能力开关与
+      `server_time`。
+
+      **时钟校准**：客户端应使用响应的 `server_time` 与本机时间计算时钟偏移，
+      并在使用 `updated_since`/`since` 游标时用偏移校正，否则时钟漂移会导致
+      漏拉或重复拉取增量。建议在建立同步基线前调用一次。
+
+      **缓存**：带 `ETag`，`If-None-Match` 命中返回 `304`；`x-cacheable: true`，
+      客户端可离线缓存（`capabilities` 变化不频繁，`server_time` 需要实时值
+      时请勿复用缓存）。
+    security: [{}]
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 服务器元信息。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/components/schemas/Meta
+            example:
+              api_version: 1.0.0
+              server_version: 1.4.2+9f1c2ab
+              server_time: '2024-05-06T07:08:09.123Z'
+              current_season: '2024-2025'
+              capabilities:
+                crawler_embedded: true
+                public_read: true
+                sse: true
+                judges:
+                  - codeforces
+                  - atcoder
+                ingest_batch_max: 500
+                idempotency_window: PT24H
+                max_stream_connections: 5
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+
+openapiJson:
+  get:
+    tags:
+      - ops
+    operationId: getOpenApiDocument
+    summary: 获取汇总后的 OpenAPI 文档
+    description: |
+      **匿名可访问**，`security: [{}]`。返回**已 bundle**、无外部 `$ref` 的
+      OpenAPI 3.1 文档，二次开发可直接拉取本契约生成客户端，无需访问仓库。
+
+      文档随服务端版本发布：`info.version` 是契约版本，`ETag` 随文档内容变化。
+      `If-None-Match` 命中返回 `304`；`x-cacheable: true`。
+
+      **时序**：文档在进程启动时固化，配置类变更不会改变本响应。
+    security: [{}]
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 汇总后的 OpenAPI 3.1 文档。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              type: object
+              description: 汇总后的 OpenAPI 3.1 文档（bundled，无外部 $ref）。
+              additionalProperties: true
+            example:
+              openapi: 3.1.0
+              info:
+                title: DMU/ICPC Dashboard API
+                version: 1.0.0
+              paths:
+                /health:
+                  get:
+                    operationId: getHealth
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+
+metrics:
+  get:
+    tags:
+      - ops
+    operationId: getMetrics
+    summary: 获取 Prometheus 指标
+    description: |
+      需要 `metrics:read`。以 Prometheus 文本暴露格式返回聚合指标，即
+      `text/plain; version=0.0.4; charset=utf-8`（Prometheus 的经典文本格式）
+      ，请求量、延迟分位、限流计数、队列长度、任务状态等。
+
+      **隐私**：只暴露聚合指标，**不含任何 PII**——没有用户名、学号、OJ ID、
+      提交内容或按主体维度的高基数标签；标签仅限路由、状态码、任务类型等。
+      如需更细的排障数据请使用审计接口（同样受权限约束）。
+
+      **时序**：指标随采集窗口滚动更新（`eventual`，滞后不超过响应头/
+      抓取间隔量级）；本端点不做缓存，适合 Prometheus 周期抓取。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    responses:
+      '200':
+        description: Prometheus 文本暴露格式的指标。
+        content:
+          text/plain:
+            schema:
+              type: string
+              description: Prometheus 文本暴露格式。
+            example: |
+              # HELP http_requests_total Total HTTP requests.
+              # TYPE http_requests_total counter
+              http_requests_total{route="/quotas",status="200"} 137
+              # TYPE http_request_duration_seconds histogram
+              http_request_duration_seconds_bucket{route="/sync/changes",le="0.5"} 120
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: eventual
+    x-freshness-bound: PT1M
+
+jobs:
+  get:
+    tags:
+      - ops
+    operationId: listJobs
+    summary: 列出异步任务
+    description: |
+      需要 `ops:read`（或任务创建者本人）。可按类型、状态与创建者过滤，
+      默认按 `created_at` 降序。
+
+      **可见性**：普通主体只能看到**自己创建**的任务；持有 `ops:read` 的主体
+      可以看到全部任务（用于运维排障）。不可见等同于不存在。
+
+      **时序**：任务状态在事务中更新，列表为强一致视图；产物的下载/结果由
+      `GET /jobs/{job_id}` 给出，成功产物过期后任务转为 `expired`。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Page
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Size
+      - name: kind
+        in: query
+        required: false
+        description: 只返回指定类型的任务。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/JobKind
+        example: roster_export
+      - name: state
+        in: query
+        required: false
+        description: 只返回指定状态的任务。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/JobState
+        example: succeeded
+      - name: created_by
+        in: query
+        required: false
+        description: 只返回该主体创建的任务；无 `ops:read` 时只能填自己。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - name: sort
+        in: query
+        required: false
+        description: 排序键；目前只支持 `created_at`。
+        schema:
+          type: string
+          enum:
+            - created_at
+          default: created_at
+        example: created_at
+      - $ref: ../components/parameters/common.yaml#/components/parameters/Order
+    responses:
+      '200':
+        description: 任务分页列表。
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/ops.yaml#/components/schemas/PagedJob
+            example:
+              page: 1
+              size: 20
+              total: 1
+              has_next: false
+              items:
+                - id: job_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                  kind: roster_export
+                  state: succeeded
+                  progress:
+                    percent: 100
+                  result:
+                    export_id: exp_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    row_count: 87
+                  error: null
+                  created_at: '2024-05-06T07:08:09.123Z'
+                  started_at: '2024-05-06T07:08:09.500Z'
+                  finished_at: '2024-05-06T07:08:11.000Z'
+                  expires_at: '2024-05-07T07:08:09.123Z'
+                  created_by:
+                    id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                    username: alice
+                    display_name: 张三
+                    kind: human
+      '400':
+        $ref: ../components/responses/common.yaml#/components/responses/BadRequest
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+
+job:
+  get:
+    tags:
+      - ops
+    operationId: getJob
+    summary: 获取异步任务
+    description: |
+      需要 `ops:read` **或为任务创建者本人**。任务不存在、或存在但对该主体不可见，
+      一律返回 `404 not_found`。
+
+      **轮询时序**：任务处于 `queued|running` 时，客户端应按响应头 `Retry-After`
+      ，默认 2 秒，长任务可更长轮询本端点；进入终态（`succeeded`/`failed`/
+      `cancelled`）后结果不再变化，应停止轮询。
+      `expired` 表示任务记录仍在但**产物已被清理**，`result` 不再可用。
+
+      **缓存**：带强 `ETag`；`If-None-Match` 命中返回 `304`（无响应体），
+      可安全用于轮询以节省带宽。长任务会周期性心跳更新 `progress`，
+      因此运行中 `ETag` 可能变化。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: job_id
+        in: path
+        required: true
+        description: 任务 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: job_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IfNoneMatch
+    responses:
+      '200':
+        description: 任务当前状态。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+          Retry-After:
+            $ref: ../components/headers/common.yaml#/components/headers/RetryAfter
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/components/schemas/Job
+            example:
+              id: job_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              kind: roster_export
+              state: running
+              progress:
+                percent: 42
+                message: 正在抓取第 3/8 页
+              result: null
+              error: null
+              created_at: '2024-05-06T07:08:09.123Z'
+              started_at: '2024-05-06T07:08:09.500Z'
+              finished_at: null
+              expires_at: '2024-05-07T07:08:09.123Z'
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+      '304':
+        $ref: ../components/responses/common.yaml#/components/responses/NotModified
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
+    x-cacheable: true
+
+jobCancel:
+  post:
+    tags:
+      - ops
+    operationId: cancelJob
+    summary: 取消异步任务
+    description: |
+      **权限**：任务创建者本人或持有 `ops:read` 的主体均可调用；
+      其它主体返回 `403 insufficient_scope`（或不可见时 `404 not_found`）。
+
+      **语义**：取消是**协作式**的——服务端把任务标记为 `cancelled` 并通知执行器；
+      已经发生的外部副作用，例如已投递的广播消息、已写入的导出文件**不会被回滚**。
+      任务可能短暂停留在 `running` 直到执行器观察到取消信号。
+
+      **状态**：对 `queued`/`running` 任务返回 `200` 与 `state: cancelled`
+      （或仍在收敛中的当前状态）；任务已是终态（`succeeded`/`failed`/`cancelled`/
+      `expired`）时返回 `409 job_not_cancellable`，不做任何修改。
+      重复取消"正在取消"的任务是幂等的，返回当前状态而不报错。
+
+      **不使用 `202`**：本端点总是同步返回任务资源，不接受异步受理语义。
+      **幂等**：`Idempotency-Key` 必填；同一键重放返回首次结果。
+    security:
+      - bearerAuth: []
+      - apiKeyAuth: []
+    parameters:
+      - name: job_id
+        in: path
+        required: true
+        description: 任务 id。
+        schema:
+          $ref: ../components/schemas/common.yaml#/components/schemas/Id
+        example: job_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+      - $ref: ../components/parameters/common.yaml#/components/parameters/IdempotencyKey
+    responses:
+      '200':
+        description: 取消请求已受理，返回任务当前状态。
+        headers:
+          ETag:
+            $ref: ../components/headers/common.yaml#/components/headers/ETag
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/components/schemas/Job
+            example:
+              id: job_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+              kind: roster_export
+              state: cancelled
+              progress:
+                percent: 42
+                message: 已请求取消
+              result: null
+              error: null
+              created_at: '2024-05-06T07:08:09.123Z'
+              started_at: '2024-05-06T07:08:09.500Z'
+              finished_at: '2024-05-06T07:09:00.000Z'
+              expires_at: '2024-05-07T07:08:09.123Z'
+              created_by:
+                id: acc_01J8Z5V6Q0K3M7N9P2R4T6W8X0
+                username: alice
+                display_name: 张三
+                kind: human
+      '401':
+        $ref: ../components/responses/common.yaml#/components/responses/Unauthenticated
+      '403':
+        $ref: ../components/responses/common.yaml#/components/responses/Forbidden
+      '404':
+        $ref: ../components/responses/common.yaml#/components/responses/NotFound
+      '409':
+        $ref: ../components/responses/common.yaml#/components/responses/Conflict
+      '429':
+        $ref: ../components/responses/common.yaml#/components/responses/RateLimited
+      '500':
+        $ref: ../components/responses/common.yaml#/components/responses/InternalError
+    x-idempotent: true
+    x-consistency: strong
